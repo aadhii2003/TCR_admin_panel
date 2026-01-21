@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 tcr-serviceAccountKey.json
 .env
+.streamlit/secrets.toml
