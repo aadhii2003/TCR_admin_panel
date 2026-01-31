@@ -7,6 +7,16 @@ import datetime
 import io
 import re
 
+# Initialize session state for authentication
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+if 'user_info' not in st.session_state:
+    st.session_state.user_info = None
+if 'show_login' not in st.session_state:
+    st.session_state.show_login = True
+# Admin credentials are hardcoded in the login logic
+# For production, store these securely in environment variables or a secure config
+
 # ====================== Page Config ======================
 st.set_page_config(
     page_title="TCR Admin • Job Portal",
@@ -79,14 +89,54 @@ with col_header2:
     st.markdown(html_content, unsafe_allow_html=True)
 st.markdown("---")
 
+# ====================== Authentication Check ======================
+if not st.session_state.authenticated:
+    st.session_state.show_login = True
+
+if st.session_state.show_login:
+    # Show login form
+    st.markdown("<h2 style='text-align: center;'>🔐 Admin Login</h2>", unsafe_allow_html=True)
+    
+    # Center the login form
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        with st.form(key='login_form'):
+            st.markdown("<h4 style='text-align: center;'>Enter Admin Credentials</h4>", unsafe_allow_html=True)
+            username = st.text_input("Admin Username", placeholder="Enter admin username")
+            password = st.text_input("Password", type="password", placeholder="Enter password")
+            submit_button = st.form_submit_button(label='Login', use_container_width=True, type='primary')
+            
+            if submit_button:
+                # Admin credential validation
+                # You can set your preferred admin email and password here
+                ADMIN_EMAIL = "admin@tcr.com"  # Change to your admin email
+                ADMIN_PASSWORD = "AdminPass123!"  # Change to your secure password
+                
+                # Alternative: Use Firebase user with role "admin"
+                # This would require checking Firebase Authentication
+                
+                if username == ADMIN_EMAIL and password == ADMIN_PASSWORD:
+                    st.session_state.authenticated = True
+                    st.session_state.user_info = {"username": username, "email": ADMIN_EMAIL}
+                    st.session_state.show_login = False
+                    st.success("Admin login successful! Redirecting to dashboard...")
+                    st.rerun()
+                else:
+                    st.error("Invalid admin credentials. Please try again.")
+                    
+        st.markdown("<p style='text-align: center; color: #64748B; font-size: 0.9em;'>Contact administrator if you don't have credentials</p>", unsafe_allow_html=True)
+    
+    # Stop execution here to show only login form
+    st.stop()
+
 # ====================== Firebase Init ======================
-if not firebase_admin._apps:
-    try:
+try:
+    if not firebase_admin._apps:
         cred = credentials.Certificate({
             "type": st.secrets["type"],
             "project_id": st.secrets["project_id"],
             "private_key_id": st.secrets["private_key_id"],
-            "private_key": st.secrets["private_key"].replace("\\n", "\n"),
+            "private_key": st.secrets["private_key"],  # Already in correct format with line breaks
             "client_email": st.secrets["client_email"],
             "client_id": st.secrets["client_id"],
             "auth_uri": st.secrets["auth_uri"],
@@ -97,10 +147,13 @@ if not firebase_admin._apps:
 
         firebase_admin.initialize_app(cred)
 
-    except Exception as e:
-        st.error("🔴 Firebase connection failed!")
-        st.exception(e)
-        st.stop()
+except Exception as e:
+    st.error("🔴 Firebase connection failed!")
+    st.error("Please check your secrets.toml file and ensure the private key is correctly formatted.")
+    st.error("The private key must have actual line breaks, not \\n characters.")
+    st.error("Make sure you have the complete private key from your service account JSON file.")
+    st.exception(e)
+    st.stop()
 
 
 db = firestore.client()
@@ -176,6 +229,14 @@ with st.sidebar:
     except:
         st.caption("Stats unavailable")
     st.markdown("---")
+    
+    # Logout button
+    if st.button("🚪 Logout", type="secondary", use_container_width=True):
+        st.session_state.authenticated = False
+        st.session_state.user_info = None
+        st.session_state.show_login = True
+        st.rerun()
+    
     st.markdown('<p class="sidebar-footer">© 2026 TCR Job Portal<br>Professional Admin System</p>', unsafe_allow_html=True)
 
 # ====================== Dashboard ======================
@@ -666,14 +727,116 @@ elif page == "🛠️ Job Categories":
 
 # ====================== Settings ======================
 else:
-    st.header("Settings & Info")
-    st.success("Professional Admin Panel • January 2026")
-    st.info("""
-    White profile card container completely removed
-    Clean, modern, borderless profile view
-    Bulk import with precise row-wise error reporting
-    All features working perfectly
-    """)
+    st.header("Settings & Account Management")
+    
+    # Create tabs for different settings
+    settings_tab, account_tab, privacy_tab = st.tabs(["⚙️ System Settings", "👤 Account Settings", "🛡️ Privacy Policy"])
+    
+    with settings_tab:
+        st.subheader("System Information")
+        st.success("Professional Admin Panel • January 2026")
+        st.info("""
+        White profile card container completely removed
+        Clean, modern, borderless profile view
+        Bulk import with precise row-wise error reporting
+        All features working perfectly
+        """)
+    
+    with account_tab:
+        st.subheader("Account Settings")
+        
+        # Form to change admin credentials
+        with st.form(key='change_credentials_form'):
+            st.write("Change your admin credentials")
+            new_email = st.text_input("New Admin Email", placeholder="Leave blank to keep current")
+            current_password = st.text_input("Current Password", type="password", placeholder="Enter current password to confirm")
+            new_password = st.text_input("New Password", type="password", placeholder="Leave blank to keep current")
+            confirm_password = st.text_input("Confirm New Password", type="password", placeholder="Re-enter new password")
+            
+            if st.form_submit_button("Update Credentials", type="primary", use_container_width=True):
+                # Current admin credentials (from login logic)
+                ADMIN_EMAIL = "admin@tcr.com"  # This should match your stored admin email
+                ADMIN_PASSWORD = "AdminPass123!"  # This should match your stored admin password
+                
+                if current_password != ADMIN_PASSWORD:
+                    st.error("Current password is incorrect!")
+                elif new_password and new_password != confirm_password:
+                    st.error("New passwords do not match!")
+                elif new_password and len(new_password) < 6:
+                    st.error("Password must be at least 6 characters long!")
+                else:
+                    # For production: update these in your code/config
+                    # Currently this just shows the new values for demonstration
+                    
+                    # Show what would be updated
+                    st.info("**Demo Mode:** In a production environment, you would update the credentials in your application code.")
+                    
+                    if new_email:
+                        st.info(f"Email would be changed to: {new_email}")
+                    
+                    if new_password:
+                        st.info("Password would be updated in secure storage.")
+                    
+                    if not new_email and not new_password:
+                        st.info("No changes requested.")
+                        
+                    # Reset form
+                    st.rerun()
+        
+        st.markdown("---")
+        st.info("**Note:** In a production environment, credentials should be stored securely using proper authentication methods like hashing and database storage.")
+    
+    with privacy_tab:
+        st.subheader("🛡️ Privacy Policy - TCR")
+        
+        st.markdown("**Last Updated:** January 31, 2026")
+        
+        st.markdown("TCR (\"we\", \"our\", \"us\") respects your privacy and is committed to protecting the personal information of users (\"you\", \"your\"). This Privacy Policy explains how we collect, use, store, and protect your information when you use the TCR mobile application (\"App\").")
+        
+        st.markdown("**By using the TCR App, you agree to the collection and use of information in accordance with this policy.**")
+        
+        st.markdown("### 1. Information We Collect")
+        st.markdown("We may collect the following types of information:")
+        
+        st.markdown("**a. Personal Information**")
+        st.markdown("- Full name\n- Email address\n- Phone number\n- Date of birth (if required)\n- Address or location details\n- Profile photo (optional)")
+        
+        st.markdown("**b. Professional Information**")
+        st.markdown("- Resume / CV details\n- Educational qualifications\n- Work experience\n- Skills and certifications\n- Job preferences")
+        
+        st.markdown("**c. Employer Information (if applicable)**")
+        st.markdown("- Company name\n- Job postings\n- Contact details\n- Hiring requirements")
+        
+        st.markdown("**d. Technical Information**")
+        st.markdown("- Device information (model, OS version)\n- App usage data\n- IP address\n- Log files and crash reports")
+        
+        st.markdown("### 2. How We Use Your Information")
+        st.markdown("We use the collected information to:")
+        st.markdown("- Create and manage user accounts\n- Connect job seekers with employers\n- Enable job applications and hiring processes\n- Improve app functionality and user experience\n- Send notifications related to jobs, updates, or system alerts\n- Provide customer support\n- Ensure security and prevent fraud")
+        
+        st.markdown("### 3. Data Sharing and Disclosure")
+        st.markdown("We do not sell or rent your personal data.\n\nYour information may be shared only:\n- Between job seekers and employers for hiring purposes\n- With trusted third-party service providers (hosting, analytics, notifications)\n- When required by law, legal process, or government authorities\n- To protect the rights, safety, or property of TCR and its users")
+        
+        st.markdown("### 4. Data Storage and Security")
+        st.markdown("We store your data securely using industry-standard security practices\n- Access to personal data is restricted to authorized personnel only\n- While we strive to protect your data, no system is 100% secure")
+        
+        st.markdown("### 5. User Rights and Choices")
+        st.markdown("You have the right to:\n- Access and update your personal information\n- Request deletion of your account and data\n- Control notification preferences\n- Withdraw consent at any time (subject to legal requirements)\n\nTo exercise these rights, contact us at the email below.")
+        
+        st.markdown("### 6. Data Retention")
+        st.markdown("We retain user data only as long as necessary:\n- To provide services\n- To comply with legal obligations\n- To resolve disputes and enforce policies")
+        
+        st.markdown("### 7. Third-Party Links")
+        st.markdown("The TCR App may contain links to third-party websites or services. We are not responsible for their privacy practices or content.")
+        
+        st.markdown("### 8. Children’s Privacy")
+        st.markdown("TCR is not intended for users under the age of 18. We do not knowingly collect personal data from children.")
+        
+        st.markdown("### 9. Changes to This Privacy Policy")
+        st.markdown("We may update this Privacy Policy from time to time. Any changes will be notified through the app or posted on this page.")
+        
+        st.markdown("### 10. Contact Us")
+        st.markdown("If you have any questions or concerns about this Privacy Policy, please contact us:\n\n**Email:** tcr122025@gmail.com\n\n**App Name:** TCR")
 
 st.markdown("---")
 st.markdown("<p style='text-align: center; color: #64748B;'>TCR Job Portal • Professional Admin Panel • January 2026</p>", unsafe_allow_html=True)
