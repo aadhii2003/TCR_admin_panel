@@ -260,6 +260,13 @@ elif page == "👥 Users/Employees":
 
     tab1, tab2, tab3 = st.tabs(["✅ Active Users", "❌ Inactive Users", "📤 Bulk Import"])
 
+    def get_full_profile(uid):
+        worker = db.collection("workers").document(uid).get()
+        user = db.collection("user_profiles").document(uid).get()
+        if worker.exists: return worker.to_dict(), "Worker"
+        if user.exists: return user.to_dict(), "User"
+        return {}, "Unknown"
+
     @st.cache_data(ttl=60)
     def load_users_optimized():
         users_data = []
