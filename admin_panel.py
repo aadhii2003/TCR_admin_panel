@@ -82,11 +82,18 @@ st.markdown("---")
 # ====================== Firebase Init ======================
 if not firebase_admin._apps:
     try:
-        cred = credentials.Certificate("tcr-serviceAccountKey.json")
-        firebase_admin.initialize_app(cred)
+        if "firebase" in st.secrets:
+            # Load from Streamlit Secrets (Recommended for Cloud)
+            firebase_config = dict(st.secrets["firebase"])
+            cred = credentials.Certificate(firebase_config)
+            firebase_admin.initialize_app(cred)
+        else:
+            # Fallback to local file
+            cred = credentials.Certificate("tcr-serviceAccountKey.json")
+            firebase_admin.initialize_app(cred)
     except Exception as e:
-        st.error("🔴 Firebase connection failed!")
-        st.info("Ensure `tcr-serviceAccountKey.json` is in the project folder.")
+        st.error(f"🔴 Firebase connection failed: {e}")
+        st.info("Ensure `tcr-serviceAccountKey.json` is in the project folder OR configured in Streamlit Secrets.")
         st.stop()
 
 db = firestore.client()
