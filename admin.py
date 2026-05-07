@@ -327,7 +327,9 @@ elif page == "👥 Users/Employees":
                     st.markdown("**Location**"); st.markdown(clean_value(profile.get("location", "N/A")))
                 with c2:
                     st.markdown("**Languages**"); st.markdown(list_to_string(profile.get("languages", [])))
-                    address_full = f"{clean_value(profile.get('address', ''))}, {clean_value(profile.get('city', ''))}, {clean_value(profile.get('state', ''))}".strip(", ")
+                    # Better address formatting
+                    addr_parts = [str(profile.get(k, "")).strip() for k in ["address", "city", "state"]]
+                    address_full = ", ".join([p for p in addr_parts if p and p.lower() != "n/a" and p != "None"])
                     st.markdown("**Address**"); st.markdown(address_full if address_full else "N/A")
                 with c3:
                     st.markdown("**About**"); st.markdown(f"_{clean_value(profile.get('about', 'No bio'))}_")
