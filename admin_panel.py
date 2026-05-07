@@ -6,6 +6,7 @@ import base64
 import datetime
 import io
 import re
+import os
 
 # ====================== Page Config ======================
 st.set_page_config(
@@ -83,17 +84,27 @@ st.markdown("---")
 if not firebase_admin._apps:
     try:
         if "firebase" in st.secrets:
-            # Load from Streamlit Secrets (Recommended for Cloud)
+            # Option 1: Nested secrets [firebase]
             firebase_config = dict(st.secrets["firebase"])
             cred = credentials.Certificate(firebase_config)
             firebase_admin.initialize_app(cred)
-        else:
-            # Fallback to local file
+        elif "project_id" in st.secrets:
+            # Option 2: Root-level secrets
+            firebase_config = {k: st.secrets[k] for k in ["type", "project_id", "private_key_id", "private_key", 
+                                                         "client_email", "client_id", "auth_uri", "token_uri", 
+                                                         "auth_provider_x509_cert_url", "client_x509_cert_url"]}
+            cred = credentials.Certificate(firebase_config)
+            firebase_admin.initialize_app(cred)
+        elif os.path.exists("tcr-serviceAccountKey.json"):
+            # Option 3: Local file (fallback)
             cred = credentials.Certificate("tcr-serviceAccountKey.json")
             firebase_admin.initialize_app(cred)
+        else:
+            st.error("🔴 Firebase credentials not found!")
+            st.info("Please add your Firebase service account JSON content to Streamlit Cloud Secrets.")
+            st.stop()
     except Exception as e:
-        st.error(f"🔴 Firebase connection failed: {e}")
-        st.info("Ensure `tcr-serviceAccountKey.json` is in the project folder OR configured in Streamlit Secrets.")
+        st.error(f"🔴 Firebase initialization failed: {e}")
         st.stop()
 
 db = firestore.client()
