@@ -260,55 +260,73 @@ elif page == "👥 Users/Employees":
 
     tab1, tab2, tab3 = st.tabs(["✅ Active Users", "❌ Inactive Users", "📤 Bulk Import"])
 
-    def get_full_profile(uid):
-        worker = db.collection("workers").document(uid).get()
-        user = db.collection("user_profiles").document(uid).get()
-        if worker.exists: return worker.to_dict(), "Worker"
-        if user.exists: return user.to_dict(), "User"
-        return {}, "Unknown"
-
-    def load_users(active_only=None):
-        users = []
+    @st.cache_data(ttl=60)
+    def load_users_optimized():
+        users_data = []
         try:
-            for user in auth.list_users().iterate_all():
-                last_sign_in = user.user_metadata.last_sign_in_timestamp
-                is_active = last_sign_in is not None
-                if (active_only is True and not is_active) or (active_only is False and is_active):
-                    continue
-                profile, role = get_full_profile(user.uid)
-                users.append({
-                    "Select": False,
-                    "UID": user.uid,
-                    "Name": clean_value(profile.get("name", user.email)),
-                    "Email": clean_value(user.email),
+            # 1. Fetch all profiles at once to avoid N+1 query problem
+            workers_ref = {doc.id: doc.to_dict() for doc in db.collection("workers").stream()}
+            profiles_ref = {doc.id: doc.to_dict() for doc in db.collection("user_profiles").stream()}
+            
+            # 2. Iterate through Auth users
+            for auth_user in auth.list_users().iterate_all():
+                uid = auth_user.uid
+                profile = {}
+                role = "Unknown"
+                
+                if uid in workers_ref:
+                    profile = workers_ref[uid]
+                    role = "Worker"
+                elif uid in profiles_ref:
+                    profile = profiles_ref[uid]
+                    role = "User"
+                
+                last_sign_in = auth_user.user_metadata.last_sign_in_timestamp
+                users_data.append({
+                    "UID": uid,
+                    "IsActive": last_sign_in is not None,
+                    "Name": clean_value(profile.get("name", auth_user.email)),
+                    "Email": clean_value(auth_user.email),
                     "Role": role,
                     "Mobile": clean_value(profile.get("mobile", "N/A")),
                     "Profession": clean_value(profile.get("profession", "N/A")),
                     "Hourly Rate": f"₹{profile.get('hourlyRate', 0)}" if profile.get('hourlyRate') else "N/A",
                     "Rating": f"{profile.get('rating', 0)}★",
                     "Experience": f"{profile.get('experienceYears', 0)} yrs",
-                    "Last Login": format_date(last_sign_in) if last_sign_in else "Never"
+                    "Last Login": format_date(last_sign_in) if last_sign_in else "Never",
+                    "Last Login TS": last_sign_in or 0
                 })
         except Exception as e:
             st.error(f"Error loading users: {e}")
-        return users
+        return users_data
 
-    def filter_users(users):
-        filtered = users
-        if search_term:
-            filtered = [u for u in filtered if search_term.lower() in str(u["Name"]).lower() or 
-                       search_term.lower() in str(u["Email"]).lower() or 
-                       search_term.lower() in str(u["Profession"]).lower()]
-        if role_filter != "All":
-            filtered = [u for u in filtered if u["Role"] == role_filter]
-        if profession_filter != "All":
-            filtered = [u for u in filtered if u["Profession"] == profession_filter]
-        return filtered
+    all_users_raw = load_users_optimized()
 
-    active_raw = load_users(active_only=True)
-    inactive_raw = load_users(active_only=False)
-    active_users = filter_users(active_raw)
-    inactive_users = filter_users(inactive_raw)
+    def filter_and_split_users(users):
+        active = []
+        inactive = []
+        
+        for u in users:
+            # Apply filters
+            if search_term:
+                s = search_term.lower()
+                if s not in str(u["Name"]).lower() and s not in str(u["Email"]).lower() and s not in str(u["Profession"]).lower():
+                    continue
+            if role_filter != "All" and u["Role"] != role_filter:
+                continue
+            if profession_filter != "All" and u["Profession"] != profession_filter:
+                continue
+            
+            # Split into active/inactive
+            user_row = {**u, "Select": False}
+            if u["IsActive"]:
+                active.append(user_row)
+            else:
+                inactive.append(user_row)
+        
+        return active, inactive
+
+    active_users, inactive_users = filter_and_split_users(all_users_raw)
 
     # Active Users Tab - PROFILE VIEW WITHOUT WHITE CARD
     with tab1:
