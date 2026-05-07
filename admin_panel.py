@@ -136,16 +136,26 @@ def parse_coordinate(val):
     if pd.isna(val) or str(val).strip() == "":
         return 0.0
     s = str(val).strip()
+    # 1. Try pure decimal
     try: return float(s)
     except: pass
     
-    # Parse DMS: 10°06'41.8"N or 10 6 41.8 N
-    match = re.match(r"(\d+)[°\s]+(\d+)['\s]+(\d+(?:\.\d+)?)[″\"\s]+([NSEW])", s, re.IGNORECASE)
-    if match:
-        d, m, s_val, dir = match.groups()
-        dec = float(d) + float(m)/60 + float(s_val)/3600
-        if dir.upper() in ['S', 'W']: dec = -dec
+    # 2. Try DMS (Degrees Minutes Seconds) - Very lenient: 10°06'41.8"N, 10 6 41.8 N, etc.
+    dms_match = re.search(r"(\d+)\D+(\d+)\D+(\d+(?:\.\d+)?)\D*([NSEW])", s, re.IGNORECASE)
+    if dms_match:
+        d, m, sv, direction = dms_match.groups()
+        dec = float(d) + float(m)/60 + float(sv)/3600
+        if direction.upper() in ['S', 'W']: dec = -dec
         return dec
+    
+    # 3. Try Decimal with Direction: 10.1234 N
+    dir_match = re.search(r"(\d+(?:\.\d+)?)\D*([NSEW])", s, re.IGNORECASE)
+    if dir_match:
+        v, direction = dir_match.groups()
+        dec = float(v)
+        if direction.upper() in ['S', 'W']: dec = -dec
+        return dec
+        
     return None
 
 DEFAULT_PHOTO = "https://firebasestorage.googleapis.com/v0/b/placeholder-images.appspot.com/o/default-avatar.png?alt=media"
