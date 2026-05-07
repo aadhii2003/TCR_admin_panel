@@ -132,6 +132,22 @@ def is_valid_email(email):
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, str(email).strip()) is not None
 
+def parse_coordinate(val):
+    if pd.isna(val) or str(val).strip() == "":
+        return 0.0
+    s = str(val).strip()
+    try: return float(s)
+    except: pass
+    
+    # Parse DMS: 10°06'41.8"N or 10 6 41.8 N
+    match = re.match(r"(\d+)[°\s]+(\d+)['\s]+(\d+(?:\.\d+)?)[″\"\s]+([NSEW])", s, re.IGNORECASE)
+    if match:
+        d, m, s_val, dir = match.groups()
+        dec = float(d) + float(m)/60 + float(s_val)/3600
+        if dir.upper() in ['S', 'W']: dec = -dec
+        return dec
+    return None
+
 DEFAULT_PHOTO = "https://firebasestorage.googleapis.com/v0/b/placeholder-images.appspot.com/o/default-avatar.png?alt=media"
 
 # ====================== Load Job Categories ======================
@@ -505,12 +521,10 @@ elif page == "👥 Users/Employees":
                     # Location validation
                     lat_val = row_dict.get("latitude")
                     lon_val = row_dict.get("longitude")
-                    if pd.notna(lat_val):
-                        try: float(lat_val)
-                        except: errors.append("Latitude must be a number")
-                    if pd.notna(lon_val):
-                        try: float(lon_val)
-                        except: errors.append("Longitude must be a number")
+                    if pd.notna(lat_val) and parse_coordinate(lat_val) is None:
+                        errors.append("Invalid Latitude (use decimal or 10°06'41\"N)")
+                    if pd.notna(lon_val) and parse_coordinate(lon_val) is None:
+                        errors.append("Invalid Longitude (use decimal or 76°31'10\"E)")
 
                     row_dict["Row"] = row_num
                     row_dict["Status"] = "Invalid" if errors else "Valid"
@@ -550,8 +564,8 @@ elif page == "👥 Users/Employees":
                                         except: return 0
                                     
                                     def safe_float(v):
-                                        try: return float(v) if pd.notna(v) else 0.0
-                                        except: return 0.0
+                                        res = parse_coordinate(v)
+                                        return res if res is not None else 0.0
 
                                     lat = safe_float(row.get("latitude"))
                                     lon = safe_float(row.get("longitude"))
