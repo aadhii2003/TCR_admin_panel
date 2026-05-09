@@ -160,6 +160,18 @@ def parse_coordinate(val):
 
 DEFAULT_PHOTO = "https://firebasestorage.googleapis.com/v0/b/placeholder-images.appspot.com/o/default-avatar.png?alt=media"
 
+# ====================== User Management Helpers ======================
+def delete_user_account(uid):
+    try:
+        # 1. Delete from Firestore (both collections)
+        db.collection("workers").document(uid).delete()
+        db.collection("user_profiles").document(uid).delete()
+        # 2. Delete from Firebase Auth
+        auth.delete_user(uid)
+        return True, "User successfully deleted from Authentication and Database."
+    except Exception as e:
+        return False, f"Error deleting user: {str(e)}"
+
 # ====================== Load Job Categories ======================
 @st.cache_data(ttl=300)
 def get_job_categories_with_details():
@@ -193,102 +205,84 @@ with st.sidebar:
     )
     st.markdown("---")
     st.markdown('<p class="sidebar-title">📈 Quick Stats</p>', unsafe_allow_html=True)
-    
-    @st.cache_data(ttl=300)
-    def get_sidebar_stats():
-        try:
-            users = list(auth.list_users().iterate_all())
-            total = len(users)
-            active = sum(1 for u in users if u.user_metadata.last_sign_in_timestamp)
-            cats = len(get_job_categories_with_details())
-            return total, active, cats
-        except:
-            return 0, 0, 0
-
-    total_u, active_u, total_c = get_sidebar_stats()
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Users", total_u)
-    with col2:
-        st.metric("Active", active_u)
-    st.metric("Categories", total_c)
+    try:
+        total_users = len(list(auth.list_users().iterate_all()))
+        active_users = sum(1 for u in auth.list_users().iterate_all() if u.user_metadata.last_sign_in_timestamp)
+        total_categories = len(get_job_categories_with_details())
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Users", total_users)
+        with col2:
+            st.metric("Active", active_users)
+        st.metric("Categories", total_categories)
+    except:
+        st.caption("Stats unavailable")
     st.markdown("---")
     st.markdown('<p class="sidebar-footer">© 2026 TCR Job Portal<br>Professional Admin System</p>', unsafe_allow_html=True)
 
 # ====================== Dashboard ======================
 if page == "📊 Dashboard":
     st.header("📊 Dashboard Overview")
-    
-    @st.cache_data(ttl=300)
-    def get_dashboard_stats():
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        try: st.metric("Total Users", len(list(auth.list_users().iterate_all())))
+        except: st.metric("Total Users", 0)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with col2:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        try: st.metric("Active Users", sum(1 for u in auth.list_users().iterate_all() if u.user_metadata.last_sign_in_timestamp))
+        except: st.metric("Active Users", 0)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with col3:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        try: st.metric("Inactive Users", sum(1 for u in auth.list_users().iterate_all() if not u.user_metadata.last_sign_in_timestamp))
+        except: st.metric("Inactive Users", 0)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with col4:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        try: st.metric("Job Categories", len(get_job_categories_with_details()))
+        except: st.metric("Job Categories", 0)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    col5, col6, col7, col8 = st.columns(4)
+    with col5:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         try:
-            users = list(auth.list_users().iterate_all())
-            total_users = len(users)
-            active_users = sum(1 for u in users if u.user_metadata.last_sign_in_timestamp)
-            inactive_users = total_users - active_users
-            
-            seven_days_ago = datetime.datetime.now() - datetime.timedelta(days=7)
-            active_week = sum(1 for u in users if u.user_metadata.last_sign_in_timestamp and 
-                            datetime.datetime.fromtimestamp(u.user_metadata.last_sign_in_timestamp / 1000) >= seven_days_ago)
-            
             worker_count = sum(1 for _ in db.collection("workers").stream())
+            st.metric("Registered Workers", worker_count)
+        except: st.metric("Registered Workers", 0)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with col6:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        try:
             user_count = sum(1 for _ in db.collection("user_profiles").stream())
-            
-            total_rating = count_rating = 0
+            st.metric("User Profiles", user_count)
+        except: st.metric("User Profiles", 0)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with col7:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        try:
+            seven_days_ago = datetime.datetime.now() - datetime.timedelta(days=7)
+            recent = sum(1 for u in auth.list_users().iterate_all() 
+                        if u.user_metadata.last_sign_in_timestamp and 
+                        datetime.datetime.fromtimestamp(u.user_metadata.last_sign_in_timestamp / 1000) >= seven_days_ago)
+            st.metric("Active This Week", recent)
+        except: st.metric("Active This Week", 0)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with col8:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        try:
+            total_rating = total_workers = 0
             for doc in db.collection("workers").stream():
-                r = doc.to_dict().get("rating")
-                if r is not None:
-                    total_rating += float(r)
-                    count_rating += 1
-            avg_rating = round(total_rating / count_rating, 2) if count_rating > 0 else 0
-            
-            return {
-                "total": total_users, "active": active_users, "inactive": inactive_users,
-                "categories": len(get_job_categories_with_details()),
-                "workers": worker_count, "profiles": user_count, "week": active_week, "rating": avg_rating
-            }
-        except Exception as e:
-            return None
-
-    stats = get_dashboard_stats()
-    if stats:
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Total Users", stats["total"])
-            st.markdown('</div>', unsafe_allow_html=True)
-        with col2:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Active Users", stats["active"])
-            st.markdown('</div>', unsafe_allow_html=True)
-        with col3:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Inactive Users", stats["inactive"])
-            st.markdown('</div>', unsafe_allow_html=True)
-        with col4:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Job Categories", stats["categories"])
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        col5, col6, col7, col8 = st.columns(4)
-        with col5:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Registered Workers", stats["workers"])
-            st.markdown('</div>', unsafe_allow_html=True)
-        with col6:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("User Profiles", stats["profiles"])
-            st.markdown('</div>', unsafe_allow_html=True)
-        with col7:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Active This Week", stats["week"])
-            st.markdown('</div>', unsafe_allow_html=True)
-        with col8:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Avg Rating", f"{stats['rating']}★")
-            st.markdown('</div>', unsafe_allow_html=True)
-    else:
-        st.warning("⚠️ Some stats could not be loaded due to Firebase quota limits.")
+                data = doc.to_dict()
+                if data.get("rating") is not None:
+                    total_rating += float(data["rating"])
+                    total_workers += 1
+            avg = round(total_rating / total_workers, 2) if total_workers > 0 else 0
+            st.metric("Avg Rating", f"{avg}★")
+        except: st.metric("Avg Rating", "0★")
+        st.markdown('</div>', unsafe_allow_html=True)
 
 # ====================== Users/Employees ======================
 elif page == "👥 Users/Employees":
@@ -331,6 +325,8 @@ elif page == "👥 Users/Employees":
                 elif uid in profiles_ref:
                     profile = profiles_ref[uid]
                     role = "User"
+                else:
+                    role = "⚠️ Orphaned (No Profile)"
                 
                 last_sign_in = auth_user.user_metadata.last_sign_in_timestamp
                 users_data.append({
@@ -422,16 +418,56 @@ elif page == "👥 Users/Employees":
                     st.markdown("**About**"); st.markdown(f"_{clean_value(profile.get('about', 'No bio'))}_")
                     st.markdown("**Status**"); st.markdown("✅ Available" if profile.get("isAvailable") else "❌ Not Available")
 
-                if st.button("❌ Close Profile", type="secondary", use_container_width=True, key="close_profile_btn"):
-                    del st.session_state.selected_uid
-                    st.rerun()
+                col_btn1, col_btn2 = st.columns(2)
+                with col_btn1:
+                    # Simple confirmation flow
+                    if f"confirm_delete_{uid}" not in st.session_state:
+                        if st.button("🗑️ Delete User Account", type="primary", use_container_width=True):
+                            st.session_state[f"confirm_delete_{uid}"] = True
+                            st.rerun()
+                    else:
+                        st.warning("⚠️ Are you sure? This will delete the user from Auth and Database.")
+                        c_del1, c_del2 = st.columns(2)
+                        with c_del1:
+                            if st.button("🔥 Confirm", type="primary", use_container_width=True):
+                                success, msg = delete_user_account(uid)
+                                if success:
+                                    st.success(msg)
+                                    del st.session_state.selected_uid
+                                    del st.session_state[f"confirm_delete_{uid}"]
+                                    st.cache_data.clear()
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                        with c_del2:
+                            if st.button("❌ Cancel", use_container_width=True):
+                                del st.session_state[f"confirm_delete_{uid}"]
+                                st.rerun()
+
+                with col_btn2:
+                    if st.button("❌ Close Profile", type="secondary", use_container_width=True, key="close_profile_btn"):
+                        del st.session_state.selected_uid
+                        st.rerun()
 
             except Exception:
-                st.error("Failed to load profile. The user may have been deleted.")
-                if st.button("❌ Close", type="secondary", use_container_width=True, key="close_error_btn"):
-                    if "selected_uid" in st.session_state:
-                        del st.session_state.selected_uid
-                    st.rerun()
+                st.error("⚠️ Profile data missing from database. This user might have been partially deleted.")
+                
+                col_err1, col_err2 = st.columns(2)
+                with col_err1:
+                    if st.button("🗑️ Force Delete from Auth", type="primary", use_container_width=True, help="Removes the user from Firebase Authentication so the email can be reused."):
+                        success, msg = delete_user_account(uid)
+                        if success:
+                            st.success(msg)
+                            del st.session_state.selected_uid
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                with col_err2:
+                    if st.button("❌ Close", type="secondary", use_container_width=True, key="close_error_btn"):
+                        if "selected_uid" in st.session_state:
+                            del st.session_state.selected_uid
+                        st.rerun()
 
         if active_users:
             df = pd.DataFrame(active_users)
@@ -532,7 +568,7 @@ elif page == "👥 Users/Employees":
                     elif not is_valid_email(email):
                         errors.append("Invalid email format")
                     elif email in existing_emails:
-                        errors.append("Email already exists")
+                        errors.append("Email already exists in Authentication. Delete the orphaned account from the 'Active Users' tab first.")
 
                     if not mobile:
                         errors.append("Mobile is required")
