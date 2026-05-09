@@ -633,7 +633,11 @@ elif page == "👥 Users/Employees":
 
                                     lat = safe_float(row.get("latitude"))
                                     lon = safe_float(row.get("longitude"))
-                                    loc_str = f"{abs(lat)} {'N' if lat >= 0 else 'S'}, {abs(lon)} {'E' if lon >= 0 else 'W'}"
+                                    location_obj = {
+                                        "latitude": lat,
+                                        "longitude": lon
+                                    }
+                                    location_updated_at = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30))).isoformat()
 
                                     worker_data = {
                                         "name": row["name"],
@@ -649,7 +653,8 @@ elif page == "👥 Users/Employees":
                                         "experienceYears": safe_int(row.get("experienceYears")),
                                         "latitude": lat,
                                         "longitude": lon,
-                                        "location": loc_str,
+                                        "location": location_obj,
+                                        "locationUpdatedAt": location_updated_at,
                                         "about": str(row.get("about", "")),
                                         "languages": [lang.strip() for lang in str(row.get("languages", "")).split(",") if lang.strip()],
                                         "profilePhoto": DEFAULT_PHOTO,
