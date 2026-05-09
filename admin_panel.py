@@ -520,7 +520,10 @@ elif page == "👥 Users/Employees":
 
         st.info("**Instructions:** Use exact profession names from 'Job_Categories_Reference' sheet • Default password: **TempPass123!**")
 
-        uploaded = st.file_uploader("Upload Filled Excel File", type=['xlsx'])
+        if 'uploader_key' not in st.session_state:
+            st.session_state.uploader_key = 0
+
+        uploaded = st.file_uploader("Upload Filled Excel File", type=['xlsx'], key=f"uploader_{st.session_state.uploader_key}")
 
         if uploaded:
             try:
@@ -670,6 +673,8 @@ elif page == "👥 Users/Employees":
 
                             st.success(f"Successfully imported {success_count} workers!")
                             st.balloons()
+                            # Clear the uploader by changing its key
+                            st.session_state.uploader_key += 1
                             st.rerun()
 
                 if invalid_rows:
