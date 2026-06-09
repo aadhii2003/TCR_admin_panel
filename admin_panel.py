@@ -181,7 +181,7 @@ def get_job_categories_with_details():
         for doc in docs:
             data = doc.to_dict()
             name = data.get("name", "").strip()
-            icon = data.get("icon", "")
+            icon = data.get("iconUrl") or data.get("icon", "")
             if name:
                 categories.append({
                     "id": doc.id,
@@ -755,9 +755,10 @@ elif page == "🛠️ Job Categories":
                         icon_b64 = base64.b64encode(icon.getvalue()).decode()
                         icon_url = f"data:{icon.type};base64,{icon_b64}"
                         db.collection("job_categories").add({
-                            "name": name.strip(),
-                            "description": desc.strip(),
-                            "icon": icon_url,
+    "name": name.strip(),
+    "description": desc.strip(),
+    "iconUrl": icon_url,
+    "icon": icon_url,
                             "created_at": firestore.SERVER_TIMESTAMP
                         })
                         st.success("Category added successfully!")
@@ -801,6 +802,7 @@ elif page == "🛠️ Job Categories":
                                 
                                 if new_icon:
                                     icon_b64 = base64.b64encode(new_icon.getvalue()).decode()
+                                    update_data["iconUrl"] = f"data:{new_icon.type};base64,{icon_b64}"
                                     update_data["icon"] = f"data:{new_icon.type};base64,{icon_b64}"
                                 
                                 db.collection("job_categories").document(selected_cat["id"]).update(update_data)
