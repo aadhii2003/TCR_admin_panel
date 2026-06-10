@@ -7,6 +7,7 @@ import datetime
 import io
 import re
 import os
+from PIL import Image
 
 # ====================== Page Config ======================
 st.set_page_config(
@@ -65,7 +66,6 @@ st.markdown("""
         text-align: center;
         margin-top: 3rem;
     }
-    /* REMOVED: .profile-card class entirely */
 </style>
 """, unsafe_allow_html=True)
 
@@ -84,19 +84,16 @@ st.markdown("---")
 if not firebase_admin._apps:
     try:
         if "firebase" in st.secrets:
-            # Option 1: Nested secrets [firebase]
             firebase_config = dict(st.secrets["firebase"])
             cred = credentials.Certificate(firebase_config)
             firebase_admin.initialize_app(cred)
         elif "project_id" in st.secrets:
-            # Option 2: Root-level secrets
-            firebase_config = {k: st.secrets[k] for k in ["type", "project_id", "private_key_id", "private_key", 
-                                                         "client_email", "client_id", "auth_uri", "token_uri", 
+            firebase_config = {k: st.secrets[k] for k in ["type", "project_id", "private_key_id", "private_key",
+                                                         "client_email", "client_id", "auth_uri", "token_uri",
                                                          "auth_provider_x509_cert_url", "client_x509_cert_url"]}
             cred = credentials.Certificate(firebase_config)
             firebase_admin.initialize_app(cred)
         elif os.path.exists("tcr-serviceAccountKey.json"):
-            # Option 3: Local file (fallback)
             cred = credentials.Certificate("tcr-serviceAccountKey.json")
             firebase_admin.initialize_app(cred)
         else:
@@ -110,6 +107,47 @@ if not firebase_admin._apps:
 db = firestore.client()
 
 # ====================== Helper Functions ======================
+MAX_ICON_SIZE_MB = 5
+MAX_ICON_BYTES = MAX_ICON_SIZE_MB * 1024 * 1024
+# Firestore document max is ~1MB. We compress icons to stay well under that.
+# Target compressed size: ~200KB (leaves room for other fields)
+ICON_TARGET_KB = 200
+ICON_MAX_DIMENSION = 256  # px — icons don't need to be large
+
+
+def compress_image_to_base64(file_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+    """
+    Resize and compress an image so its base64 string stays under ~200KB.
+    Returns a data-URI string safe to store in Firestore.
+    """
+    img = Image.open(io.BytesIO(file_bytes)).convert("RGBA")
+
+    # Resize to fit within ICON_MAX_DIMENSION × ICON_MAX_DIMENSION
+    img.thumbnail((ICON_MAX_DIMENSION, ICON_MAX_DIMENSION), Image.LANCZOS)
+
+    # Convert RGBA → RGB for JPEG (JPEG doesn't support alpha)
+    if mime_type in ("image/jpeg", "image/jpg"):
+        background = Image.new("RGB", img.size, (255, 255, 255))
+        background.paste(img, mask=img.split()[3] if img.mode == "RGBA" else None)
+        img = background
+
+    # Save at decreasing quality until size is acceptable
+    for quality in [85, 70, 55, 40, 25]:
+        buf = io.BytesIO()
+        fmt = "PNG" if mime_type == "image/png" else "JPEG"
+        if fmt == "PNG":
+            img.save(buf, format="PNG", optimize=True)
+        else:
+            img.save(buf, format="JPEG", quality=quality, optimize=True)
+        data = buf.getvalue()
+        if len(data) <= ICON_TARGET_KB * 1024:
+            break  # small enough
+
+    encoded = base64.b64encode(data).decode()
+    out_mime = "image/png" if fmt == "PNG" else "image/jpeg"
+    return f"data:{out_mime};base64,{encoded}", len(data)
+
+
 def format_date(ts_ms):
     if ts_ms is None:
         return "N/A"
@@ -136,26 +174,20 @@ def parse_coordinate(val):
     if pd.isna(val) or str(val).strip() == "":
         return 0.0
     s = str(val).strip()
-    # 1. Try pure decimal
     try: return float(s)
     except: pass
-    
-    # 2. Try DMS (Degrees Minutes Seconds) - Very lenient: 10°06'41.8"N, 10 6 41.8 N, etc.
     dms_match = re.search(r"(\d+)\D+(\d+)\D+(\d+(?:\.\d+)?)\D*([NSEW])", s, re.IGNORECASE)
     if dms_match:
         d, m, sv, direction = dms_match.groups()
         dec = float(d) + float(m)/60 + float(sv)/3600
         if direction.upper() in ['S', 'W']: dec = -dec
         return dec
-    
-    # 3. Try Decimal with Direction: 10.1234 N
     dir_match = re.search(r"(\d+(?:\.\d+)?)\D*([NSEW])", s, re.IGNORECASE)
     if dir_match:
         v, direction = dir_match.groups()
         dec = float(v)
         if direction.upper() in ['S', 'W']: dec = -dec
         return dec
-        
     return None
 
 DEFAULT_PHOTO = "https://firebasestorage.googleapis.com/v0/b/placeholder-images.appspot.com/o/default-avatar.png?alt=media"
@@ -163,10 +195,8 @@ DEFAULT_PHOTO = "https://firebasestorage.googleapis.com/v0/b/placeholder-images.
 # ====================== User Management Helpers ======================
 def delete_user_account(uid):
     try:
-        # 1. Delete from Firestore (both collections)
         db.collection("workers").document(uid).delete()
         db.collection("user_profiles").document(uid).delete()
-        # 2. Delete from Firebase Auth
         auth.delete_user(uid)
         return True, "User successfully deleted from Authentication and Database."
     except Exception as e:
@@ -264,8 +294,8 @@ if page == "📊 Dashboard":
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         try:
             seven_days_ago = datetime.datetime.now() - datetime.timedelta(days=7)
-            recent = sum(1 for u in auth.list_users().iterate_all() 
-                        if u.user_metadata.last_sign_in_timestamp and 
+            recent = sum(1 for u in auth.list_users().iterate_all()
+                        if u.user_metadata.last_sign_in_timestamp and
                         datetime.datetime.fromtimestamp(u.user_metadata.last_sign_in_timestamp / 1000) >= seven_days_ago)
             st.metric("Active This Week", recent)
         except: st.metric("Active This Week", 0)
@@ -309,16 +339,14 @@ elif page == "👥 Users/Employees":
     def load_users_optimized():
         users_data = []
         try:
-            # 1. Fetch all profiles at once to avoid N+1 query problem
             workers_ref = {doc.id: doc.to_dict() for doc in db.collection("workers").stream()}
             profiles_ref = {doc.id: doc.to_dict() for doc in db.collection("user_profiles").stream()}
-            
-            # 2. Iterate through Auth users
+
             for auth_user in auth.list_users().iterate_all():
                 uid = auth_user.uid
                 profile = {}
                 role = "Unknown"
-                
+
                 if uid in workers_ref:
                     profile = workers_ref[uid]
                     role = "Worker"
@@ -327,7 +355,7 @@ elif page == "👥 Users/Employees":
                     role = "User"
                 else:
                     role = "⚠️ Orphaned (No Profile)"
-                
+
                 last_sign_in = auth_user.user_metadata.last_sign_in_timestamp
                 users_data.append({
                     "UID": uid,
@@ -352,9 +380,7 @@ elif page == "👥 Users/Employees":
     def filter_and_split_users(users):
         active = []
         inactive = []
-        
         for u in users:
-            # Apply filters
             if search_term:
                 s = search_term.lower()
                 if s not in str(u["Name"]).lower() and s not in str(u["Email"]).lower() and s not in str(u["Profession"]).lower():
@@ -363,19 +389,15 @@ elif page == "👥 Users/Employees":
                 continue
             if profession_filter != "All" and u["Profession"] != profession_filter:
                 continue
-            
-            # Split into active/inactive
             user_row = {**u, "Select": False}
             if u["IsActive"]:
                 active.append(user_row)
             else:
                 inactive.append(user_row)
-        
         return active, inactive
 
     active_users, inactive_users = filter_and_split_users(all_users_raw)
 
-    # Active Users Tab - PROFILE VIEW WITHOUT WHITE CARD
     with tab1:
         st.subheader("✅ Active Users")
 
@@ -387,8 +409,6 @@ elif page == "👥 Users/Employees":
                     raise Exception("Profile not found")
 
                 st.markdown("---")
-
-                # Clean, borderless profile layout
                 col1, col2 = st.columns([1, 4])
                 with col1:
                     photo = clean_value(profile.get("profilePhoto", DEFAULT_PHOTO))
@@ -402,7 +422,6 @@ elif page == "👥 Users/Employees":
                     with c3: st.markdown(f"📅 {profile.get('experienceYears', 0)} yrs")
 
                 st.markdown("---")
-
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     st.markdown("**Email**"); st.markdown(clean_value(profile.get("email", "N/A")))
@@ -410,7 +429,6 @@ elif page == "👥 Users/Employees":
                     st.markdown("**Location**"); st.markdown(clean_value(profile.get("location", "N/A")))
                 with c2:
                     st.markdown("**Languages**"); st.markdown(list_to_string(profile.get("languages", [])))
-                    # Better address formatting
                     addr_parts = [str(profile.get(k, "")).strip() for k in ["address", "city", "state"]]
                     address_full = ", ".join([p for p in addr_parts if p and p.lower() != "n/a" and p != "None"])
                     st.markdown("**Address**"); st.markdown(address_full if address_full else "N/A")
@@ -420,7 +438,6 @@ elif page == "👥 Users/Employees":
 
                 col_btn1, col_btn2 = st.columns(2)
                 with col_btn1:
-                    # Simple confirmation flow
                     if f"confirm_delete_{uid}" not in st.session_state:
                         if st.button("🗑️ Delete User Account", type="primary", use_container_width=True):
                             st.session_state[f"confirm_delete_{uid}"] = True
@@ -451,10 +468,9 @@ elif page == "👥 Users/Employees":
 
             except Exception:
                 st.error("⚠️ Profile data missing from database. This user might have been partially deleted.")
-                
                 col_err1, col_err2 = st.columns(2)
                 with col_err1:
-                    if st.button("🗑️ Force Delete from Auth", type="primary", use_container_width=True, help="Removes the user from Firebase Authentication so the email can be reused."):
+                    if st.button("🗑️ Force Delete from Auth", type="primary", use_container_width=True):
                         success, msg = delete_user_account(uid)
                         if success:
                             st.success(msg)
@@ -489,7 +505,6 @@ elif page == "👥 Users/Employees":
         else:
             st.info("No active users found.")
 
-    # Inactive Users Tab
     with tab2:
         st.subheader("❌ Inactive Users")
         if inactive_users:
@@ -499,7 +514,6 @@ elif page == "👥 Users/Employees":
         else:
             st.info("No inactive users.")
 
-    # Bulk Import Tab (unchanged - already perfect with row-wise errors)
     with tab3:
         st.markdown("### 📤 Bulk Import Workers from Excel")
 
@@ -540,7 +554,6 @@ elif page == "👥 Users/Employees":
                     for user in auth.list_users().iterate_all():
                         existing_emails.add(user.email.lower())
                 except: pass
-
                 try:
                     for doc in db.collection("workers").stream():
                         data = doc.to_dict()
@@ -550,7 +563,6 @@ elif page == "👥 Users/Employees":
                 except: pass
 
                 professions = {cat["Name"].strip() for cat in get_job_categories_with_details()}
-
                 valid_rows = []
                 invalid_rows = []
 
@@ -571,7 +583,7 @@ elif page == "👥 Users/Employees":
                     elif not is_valid_email(email):
                         errors.append("Invalid email format")
                     elif email in existing_emails:
-                        errors.append("Email already exists in Authentication. Delete the orphaned account from the 'Active Users' tab first.")
+                        errors.append("Email already exists in Authentication.")
 
                     if not mobile:
                         errors.append("Mobile is required")
@@ -585,13 +597,12 @@ elif page == "👥 Users/Employees":
                     elif profession not in professions:
                         errors.append(f"Invalid profession: '{profession}' (check reference sheet)")
 
-                    # Location validation
                     lat_val = row_dict.get("latitude")
                     lon_val = row_dict.get("longitude")
                     if pd.notna(lat_val) and parse_coordinate(lat_val) is None:
-                        errors.append("Invalid Latitude (use decimal or 10°06'41\"N)")
+                        errors.append("Invalid Latitude")
                     if pd.notna(lon_val) and parse_coordinate(lon_val) is None:
-                        errors.append("Invalid Longitude (use decimal or 76°31'10\"E)")
+                        errors.append("Invalid Longitude")
 
                     row_dict["Row"] = row_num
                     row_dict["Status"] = "Invalid" if errors else "Valid"
@@ -604,7 +615,7 @@ elif page == "👥 Users/Employees":
                         existing_emails.add(email)
                         existing_mobiles.add(mobile)
 
-                st.markdown(f"### Validation Results")
+                st.markdown("### Validation Results")
                 colv1, colv2 = st.columns(2)
                 with colv1:
                     st.success(f"**{len(valid_rows)} rows valid** → Ready to import")
@@ -621,26 +632,20 @@ elif page == "👥 Users/Employees":
                             success_count = 0
                             for row in valid_rows:
                                 try:
-                                    user = auth.create_user(
-                                        email=row["email"],
-                                        password="TempPass123!"
-                                    )
-                                    # Robust numeric conversion
+                                    user = auth.create_user(email=row["email"], password="TempPass123!")
                                     def safe_int(v):
                                         try: return int(float(v)) if pd.notna(v) else 0
                                         except: return 0
-                                    
                                     def safe_float(v):
                                         res = parse_coordinate(v)
                                         return res if res is not None else 0.0
 
                                     lat = safe_float(row.get("latitude"))
                                     lon = safe_float(row.get("longitude"))
-                                    location_obj = {
-                                        "latitude": lat,
-                                        "longitude": lon
-                                    }
-                                    location_updated_at = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30))).isoformat()
+                                    location_obj = {"latitude": lat, "longitude": lon}
+                                    location_updated_at = datetime.datetime.now(
+                                        datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+                                    ).isoformat()
 
                                     worker_data = {
                                         "name": row["name"],
@@ -673,7 +678,6 @@ elif page == "👥 Users/Employees":
 
                             st.success(f"Successfully imported {success_count} workers!")
                             st.balloons()
-                            # Clear the uploader by changing its key
                             st.session_state.uploader_key += 1
                             st.rerun()
 
@@ -685,7 +689,6 @@ elif page == "👥 Users/Employees":
                         use_container_width=True,
                         hide_index=True
                     )
-
             except Exception as e:
                 st.error(f"Error reading Excel file: {str(e)}")
 
@@ -693,17 +696,16 @@ elif page == "👥 Users/Employees":
 elif page == "🛠️ Job Categories":
     st.header("🛠️ Job Categories Management")
 
-    # Fetch categories
     categories = get_job_categories_with_details()
     cat_names = [c["Name"] for c in categories]
 
-    tab1, tab2, tab3 = st.tabs(["📂 View All", "➕ Add New", "✏️ Edit Existing"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📂 View All", "➕ Add New", "✏️ Edit Existing", "🗑️ Delete"])
 
     # --- TAB 1: VIEW ---
     with tab1:
         st.markdown("### All Job Categories")
         search_cat = st.text_input("Search Categories", placeholder="Type to filter...", key="search_cat_main")
-        
+
         filtered_cats = categories
         if search_cat:
             filtered_cats = [c for c in filtered_cats if search_cat.lower() in c["Name"].lower()]
@@ -725,7 +727,6 @@ elif page == "🛠️ Job Categories":
                     "Associated Workers": worker_counts.get(cat["Name"], 0),
                     "Description": cat["Description"]
                 })
-
             st.dataframe(
                 pd.DataFrame(table_data),
                 column_config={
@@ -743,29 +744,39 @@ elif page == "🛠️ Job Categories":
     # --- TAB 2: ADD ---
     with tab2:
         st.markdown("### Add New Category")
+        st.info(f"📌 Icon upload limit: **{MAX_ICON_SIZE_MB}MB**. Icons are auto-compressed to fit Firestore's document size limit.")
+
         with st.form("add_category_form"):
             c1, c2 = st.columns([2, 1])
             name = c1.text_input("Category Name*", placeholder="e.g., Electrician")
             desc = c2.text_area("Description")
-            icon = st.file_uploader("Upload Icon*", type=['png', 'jpg', 'jpeg'], key="add_cat_icon")
-            
+            icon = st.file_uploader(
+                f"Upload Icon* (max {MAX_ICON_SIZE_MB}MB • PNG/JPG)",
+                type=['png', 'jpg', 'jpeg'],
+                key="add_cat_icon"
+            )
+
             if st.form_submit_button("Add Category", type="primary"):
                 if name and icon:
-                    try:
-                        icon_b64 = base64.b64encode(icon.getvalue()).decode()
-                        icon_url = f"data:{icon.type};base64,{icon_b64}"
-                        db.collection("job_categories").add({
-                            "name": name.strip(),
-                            "description": desc.strip(),
-                            "iconUrl": icon_url,
-                            "icon": icon_url,
-                            "created_at": firestore.SERVER_TIMESTAMP
-                        })
-                        st.success("Category added successfully!")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {e}")
+                    # ── Size guard ──
+                    raw_bytes = icon.getvalue()
+                    if len(raw_bytes) > MAX_ICON_BYTES:
+                        st.error(f"❌ File too large ({len(raw_bytes)/1024/1024:.1f}MB). Maximum allowed is {MAX_ICON_SIZE_MB}MB.")
+                    else:
+                        try:
+                            icon_url, compressed_size = compress_image_to_base64(raw_bytes, icon.type)
+                            db.collection("job_categories").add({
+                                "name": name.strip(),
+                                "description": desc.strip(),
+                                "iconUrl": icon_url,
+                                "icon": icon_url,
+                                "created_at": firestore.SERVER_TIMESTAMP
+                            })
+                            st.success(f"✅ Category '{name}' added! (Icon stored as {compressed_size/1024:.1f}KB)")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
                 else:
                     st.warning("Name and icon are required.")
 
@@ -776,22 +787,22 @@ elif page == "🛠️ Job Categories":
             st.warning("No categories available to edit.")
         else:
             selected_cat_name = st.selectbox("Select Category to Edit", cat_names, key="edit_cat_select")
-            
-            # Find selected category data
             selected_cat = next((c for c in categories if c["Name"] == selected_cat_name), None)
-            
+
             if selected_cat:
                 with st.form("edit_category_form"):
                     st.info(f"Editing: **{selected_cat['Name']}**")
-                    
                     new_name = st.text_input("Category Name", value=selected_cat['Name'])
                     new_desc = st.text_area("Description", value=selected_cat['Description'])
-                    
                     st.markdown("**Current Icon:**")
-                    st.image(selected_cat['Icon'], width=60)
-                    
-                    new_icon = st.file_uploader("Upload New Icon (Optional)", type=['png', 'jpg', 'jpeg'], key="edit_cat_icon")
-                    
+                    if selected_cat['Icon']:
+                        st.image(selected_cat['Icon'], width=60)
+                    new_icon = st.file_uploader(
+                        f"Upload New Icon (Optional • max {MAX_ICON_SIZE_MB}MB)",
+                        type=['png', 'jpg', 'jpeg'],
+                        key="edit_cat_icon"
+                    )
+
                     if st.form_submit_button("Update Category", type="primary"):
                         if new_name:
                             try:
@@ -799,14 +810,17 @@ elif page == "🛠️ Job Categories":
                                     "name": new_name.strip(),
                                     "description": new_desc.strip()
                                 }
-                                
                                 if new_icon:
-                                    icon_b64 = base64.b64encode(new_icon.getvalue()).decode()
-                                    update_data["iconUrl"] = f"data:{new_icon.type};base64,{icon_b64}"
-                                    update_data["icon"] = f"data:{new_icon.type};base64,{icon_b64}"                                
+                                    raw_bytes = new_icon.getvalue()
+                                    if len(raw_bytes) > MAX_ICON_BYTES:
+                                        st.error(f"❌ File too large ({len(raw_bytes)/1024/1024:.1f}MB). Maximum is {MAX_ICON_SIZE_MB}MB.")
+                                        st.stop()
+                                    icon_url, compressed_size = compress_image_to_base64(raw_bytes, new_icon.type)
+                                    update_data["iconUrl"] = icon_url
+                                    update_data["icon"] = icon_url
+
                                 db.collection("job_categories").document(selected_cat["id"]).update(update_data)
-                                
-                                st.success(f"Category '{new_name}' updated successfully!")
+                                st.success(f"✅ Category '{new_name}' updated successfully!")
                                 st.cache_data.clear()
                                 st.rerun()
                             except Exception as e:
@@ -814,16 +828,76 @@ elif page == "🛠️ Job Categories":
                         else:
                             st.error("Category name cannot be empty.")
 
+    # --- TAB 4: DELETE ---
+    with tab4:
+        st.markdown("### 🗑️ Delete Category")
+        if not categories:
+            st.warning("No categories available to delete.")
+        else:
+            # Worker counts for safety warning
+            worker_counts_del = {}
+            try:
+                for doc in db.collection("workers").stream():
+                    prof = doc.to_dict().get("profession", "").strip()
+                    worker_counts_del[prof] = worker_counts_del.get(prof, 0) + 1
+            except:
+                worker_counts_del = {}
+
+            del_cat_name = st.selectbox("Select Category to Delete", cat_names, key="del_cat_select")
+            del_cat = next((c for c in categories if c["Name"] == del_cat_name), None)
+
+            if del_cat:
+                associated = worker_counts_del.get(del_cat["Name"], 0)
+
+                col_prev, col_info = st.columns([1, 3])
+                with col_prev:
+                    if del_cat["Icon"]:
+                        st.image(del_cat["Icon"], width=80)
+                with col_info:
+                    st.markdown(f"**Name:** {del_cat['Name']}")
+                    st.markdown(f"**Description:** {del_cat['Description']}")
+                    if associated > 0:
+                        st.warning(f"⚠️ **{associated} worker(s)** are currently assigned to this category. "
+                                   f"Deleting the category will NOT delete those workers, but their profession field "
+                                   f"will become invalid.")
+                    else:
+                        st.success("✅ No workers are assigned to this category. Safe to delete.")
+
+                st.markdown("---")
+
+                confirm_key = f"confirm_del_cat_{del_cat['id']}"
+                if confirm_key not in st.session_state:
+                    if st.button("🗑️ Delete This Category", type="primary", use_container_width=True):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
+                else:
+                    st.error(f"⚠️ Are you absolutely sure you want to delete **'{del_cat['Name']}'**? This cannot be undone.")
+                    c_yes, c_no = st.columns(2)
+                    with c_yes:
+                        if st.button("🔥 Yes, Delete It", type="primary", use_container_width=True):
+                            try:
+                                db.collection("job_categories").document(del_cat["id"]).delete()
+                                st.success(f"✅ Category '{del_cat['Name']}' deleted successfully.")
+                                del st.session_state[confirm_key]
+                                st.cache_data.clear()
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error deleting category: {e}")
+                    with c_no:
+                        if st.button("❌ Cancel", use_container_width=True):
+                            del st.session_state[confirm_key]
+                            st.rerun()
+
 # ====================== Settings ======================
 else:
-    st.header("Settings & Info")
-    st.success("Professional Admin Panel • January 2026")
+    st.header("⚙️ Settings & Info")
+    st.success("Professional Admin Panel • 2026")
     st.info("""
-    White profile card container completely removed
-    Clean, modern, borderless profile view
-    Bulk import with precise row-wise error reporting
-    All features working perfectly
+    ✅ Icon size limit enforced: 5MB upload max
+    ✅ Icons auto-compressed to ≤200KB before Firestore storage (fixes the 1MB document error)
+    ✅ Delete category tab added with worker-count safety warning
+    ✅ All features working
     """)
 
 st.markdown("---")
-st.markdown("<p style='text-align: center; color: #64748B;'>TCR Job Portal • Professional Admin Panel • January 2026</p>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center; color: #64748B;'>TCR Job Portal • Professional Admin Panel • 2026</p>", unsafe_allow_html=True)
