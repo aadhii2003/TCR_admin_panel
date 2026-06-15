@@ -211,7 +211,7 @@ def get_job_categories_with_details():
         for doc in docs:
             data = doc.to_dict()
             name = data.get("name", "").strip()
-            icon = data.get("iconUrl") or data.get("icon", "")
+            icon = data.get("iconUrl")
             if name:
                 categories.append({
                     "id": doc.id,
