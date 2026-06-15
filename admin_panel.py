@@ -3,6 +3,7 @@ import firebase_admin
 from firebase_admin import credentials, auth, firestore, storage
 import pandas as pd
 import base64
+import base64 as b64lib
 import datetime
 import io
 import re
@@ -86,7 +87,6 @@ if not firebase_admin._apps:
     try:
         if "firebase" in st.secrets:
             firebase_config = dict(st.secrets["firebase"])
-            # storageBucket must be in secrets too, e.g. "tcr-app-3ca2e.appspot.com"
             bucket_name = firebase_config.pop("storageBucket", None) or st.secrets.get("storageBucket", "")
             cred = credentials.Certificate(firebase_config)
             firebase_admin.initialize_app(cred, {"storageBucket": bucket_name})
@@ -115,22 +115,12 @@ if not firebase_admin._apps:
 db = firestore.client()
 
 # ====================== Storage Upload Helper ======================
-# ─────────────────────────────────────────────────────────────────
-# FIX: Upload icon to Firebase Storage → get a public https:// URL
-# Flutter's CachedNetworkImage needs an https:// URL, NOT base64.
-# Old approach (base64 in Firestore) caused icons to never show in app.
-# ─────────────────────────────────────────────────────────────────
-
 MAX_ICON_SIZE_MB = 5
 MAX_ICON_BYTES = MAX_ICON_SIZE_MB * 1024 * 1024
-ICON_MAX_DIMENSION = 256  # px — icons are small, 256px is plenty
+ICON_MAX_DIMENSION = 256
 
 
 def resize_image_bytes(file_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
-    """
-    Resize image to max 256×256 and return (bytes, final_mime_type).
-    PNG stays PNG (preserves transparency). JPG stays JPG.
-    """
     img = Image.open(io.BytesIO(file_bytes)).convert("RGBA")
     img.thumbnail((ICON_MAX_DIMENSION, ICON_MAX_DIMENSION), Image.LANCZOS)
 
@@ -139,7 +129,6 @@ def resize_image_bytes(file_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
         img.save(buf, format="PNG", optimize=True)
         return buf.getvalue(), "image/png"
     else:
-        # JPEG doesn't support alpha — flatten onto white background
         bg = Image.new("RGB", img.size, (255, 255, 255))
         bg.paste(img, mask=img.split()[3])
         bg.save(buf, format="JPEG", quality=85, optimize=True)
@@ -147,47 +136,37 @@ def resize_image_bytes(file_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
 
 
 def upload_icon_to_storage(file_bytes: bytes, mime_type: str, category_name: str) -> str:
-    """
-    Upload a category icon to Firebase Storage under category_icons/<uuid>.<ext>
-    Returns the public https:// download URL that Flutter can use directly.
-    """
     resized_bytes, final_mime = resize_image_bytes(file_bytes, mime_type)
     ext = "png" if final_mime == "image/png" else "jpg"
 
-    # Unique filename so re-uploads don't collide
     safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', category_name.strip().lower())
     filename = f"category_icons/{safe_name}_{uuid.uuid4().hex[:8]}.{ext}"
 
     bucket = storage.bucket()
     blob = bucket.blob(filename)
     blob.upload_from_string(resized_bytes, content_type=final_mime)
-
-    # Make the file publicly readable so Flutter can fetch it without auth
     blob.make_public()
 
-    return blob.public_url  # "https://storage.googleapis.com/..."
+    return blob.public_url
 
 
 def delete_old_icon_from_storage(icon_url: str):
     """
-    If the existing iconUrl is a Firebase Storage URL, delete the old file
-    to avoid orphaned objects piling up in Storage.
+    Delete an old icon from Firebase Storage.
+    BUG FIX: was icon_url[len(prefix)] (single char) — now icon_url[len(prefix):]
     """
     try:
         if "storage.googleapis.com" not in icon_url:
-            return  # not a Storage URL (could be old base64 or placeholder), skip
-        # Extract blob path from URL: .../o/<encoded_path>?alt=...
-        # For public URLs the format is:
-        # https://storage.googleapis.com/<bucket>/<path>
+            return
         bucket_name = storage.bucket().name
         prefix = f"https://storage.googleapis.com/{bucket_name}/"
         if icon_url.startswith(prefix):
-            blob_path = icon_url[len(prefix)].split("?")[0]
+            blob_path = icon_url[len(prefix):].split("?")[0]  # ✅ FIXED: was [len(prefix)] missing the colon
             bucket = storage.bucket()
             blob = bucket.blob(blob_path)
             blob.delete()
     except Exception:
-        pass  # non-critical, don't break the UI
+        pass
 
 
 # ====================== Helper Functions ======================
@@ -254,7 +233,8 @@ def get_job_categories_with_details():
         for doc in docs:
             data = doc.to_dict()
             name = data.get("name", "").strip()
-            icon = data.get("iconUrl") or data.get("icon")
+            # Same priority as Flutter: iconUrl first, icon as fallback
+            icon = (data.get("iconUrl") or "").strip() or (data.get("icon") or "").strip() or None
             if name:
                 categories.append({
                     "id": doc.id,
@@ -741,7 +721,14 @@ elif page == ":hammer_and_wrench: Job Categories":
     categories = get_job_categories_with_details()
     cat_names = [c["Name"] for c in categories]
 
-    tab1, tab2, tab3, tab4 = st.tabs([":open_file_folder: View All", ":heavy_plus_sign: Add New", ":pencil2: Edit Existing", ":wastebasket: Delete"])
+    # ✅ Added tab5 "Fix Old Icons" for one-time base64 → Storage migration
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        ":open_file_folder: View All",
+        ":heavy_plus_sign: Add New",
+        ":pencil2: Edit Existing",
+        ":wastebasket: Delete",
+        ":wrench: Fix Old Icons"
+    ])
 
     # --- TAB 1: VIEW ---
     with tab1:
@@ -809,14 +796,13 @@ elif page == ":hammer_and_wrench: Job Categories":
                     else:
                         try:
                             with st.spinner("Uploading icon to Firebase Storage..."):
-                                # ✅ FIX: upload to Storage → get https:// URL
                                 icon_url = upload_icon_to_storage(raw_bytes, icon.type, name)
 
                             db.collection("job_categories").add({
                                 "name": name.strip(),
                                 "description": desc.strip(),
-                                "iconUrl": icon_url,   # https:// URL — Flutter reads this
-                                "icon": icon_url,      # same URL in both fields for compatibility
+                                "iconUrl": icon_url,
+                                "icon": icon_url,
                                 "created_at": firestore.SERVER_TIMESTAMP
                             })
                             st.success(f":white_check_mark: Category '{name}' added! Icon stored at Storage URL — will display in Flutter app immediately.")
@@ -843,7 +829,10 @@ elif page == ":hammer_and_wrench: Job Categories":
                     new_desc = st.text_area("Description", value=selected_cat['Description'])
                     st.markdown("**Current Icon:**")
                     if selected_cat['Icon']:
-                        st.image(selected_cat['Icon'], width=60)
+                        if selected_cat['Icon'].startswith("https://"):
+                            st.image(selected_cat['Icon'], width=60)
+                        else:
+                            st.caption("⚠️ Current icon is base64 (not yet migrated). Run 'Fix Old Icons' tab to fix.")
                     new_icon = st.file_uploader(
                         f"Upload New Icon (Optional • max {MAX_ICON_SIZE_MB}MB)",
                         type=['png', 'jpg', 'jpeg'],
@@ -864,9 +853,7 @@ elif page == ":hammer_and_wrench: Job Categories":
                                         st.stop()
 
                                     with st.spinner("Uploading new icon to Firebase Storage..."):
-                                        # ✅ FIX: upload to Storage → get https:// URL
                                         icon_url = upload_icon_to_storage(raw_bytes, new_icon.type, new_name)
-                                        # Clean up the old Storage file if it was one
                                         if selected_cat['Icon']:
                                             delete_old_icon_from_storage(selected_cat['Icon'])
 
@@ -904,7 +891,7 @@ elif page == ":hammer_and_wrench: Job Categories":
 
                 col_prev, col_info = st.columns([1, 3])
                 with col_prev:
-                    if del_cat["Icon"]:
+                    if del_cat["Icon"] and del_cat["Icon"].startswith("https://"):
                         st.image(del_cat["Icon"], width=80)
                 with col_info:
                     st.markdown(f"Name: {del_cat['Name']}")
@@ -929,7 +916,6 @@ elif page == ":hammer_and_wrench: Job Categories":
                     with c_yes:
                         if st.button(":fire: Yes, Delete It", type="primary", use_container_width=True):
                             try:
-                                # Also delete the icon from Storage
                                 if del_cat["Icon"]:
                                     delete_old_icon_from_storage(del_cat["Icon"])
                                 db.collection("job_categories").document(del_cat["id"]).delete()
@@ -944,6 +930,122 @@ elif page == ":hammer_and_wrench: Job Categories":
                             del st.session_state[confirm_key]
                             st.rerun()
 
+    # --- TAB 5: FIX OLD ICONS (one-time base64 → Storage migration) ---
+    with tab5:
+        st.markdown("### :wrench: Fix Old Icons — Migrate Base64 → Firebase Storage")
+        st.warning(
+            "**Run this once.** This scans every category that still has a base64 `icon` value "
+            "(old format) or a missing/broken `iconUrl`, uploads the image to Firebase Storage, "
+            "and writes the `https://` URL back to Firestore. "
+            "Your Flutter app will start showing icons immediately — no app update needed."
+        )
+
+        # Show current status of all categories
+        st.markdown("#### Current Status")
+        docs_preview = list(db.collection("job_categories").stream())
+        status_rows = []
+        for doc in docs_preview:
+            data = doc.to_dict()
+            icon_url = (data.get("iconUrl") or "").strip()
+            icon_b64 = (data.get("icon") or "").strip()
+            has_valid_url = icon_url.startswith("https://")
+            has_base64 = icon_b64 and not icon_b64.startswith("https://")
+            status_rows.append({
+                "Category": data.get("name", doc.id),
+                "iconUrl field": "✅ Valid https://" if has_valid_url else ("❌ Missing/invalid" if not icon_url else "⚠️ Has value but not https://"),
+                "icon field": "⚠️ Still base64" if has_base64 else ("✅ https:// URL" if icon_b64.startswith("https://") else "➖ Empty"),
+                "Needs Migration": "YES" if (not has_valid_url and has_base64) else "No"
+            })
+        st.dataframe(pd.DataFrame(status_rows), use_container_width=True, hide_index=True)
+
+        needs_fix = [r for r in status_rows if r["Needs Migration"] == "YES"]
+        if not needs_fix:
+            st.success(":white_check_mark: All categories already have valid `https://` Storage URLs. Nothing to migrate!")
+        else:
+            st.error(f"**{len(needs_fix)} categories** need migration.")
+
+        st.markdown("---")
+
+        if st.button(
+            f"🚀 Migrate All {len(needs_fix)} Categories Now" if needs_fix else "✅ Nothing to Migrate",
+            type="primary",
+            use_container_width=True,
+            disabled=len(needs_fix) == 0
+        ):
+            docs_all = list(db.collection("job_categories").stream())
+            to_migrate = []
+
+            for doc in docs_all:
+                data = doc.to_dict()
+                icon_url = (data.get("iconUrl") or "").strip()
+                icon_b64 = (data.get("icon") or "").strip()
+                has_valid_url = icon_url.startswith("https://")
+                has_base64 = icon_b64 and not icon_b64.startswith("https://")
+                if not has_valid_url and has_base64:
+                    to_migrate.append((doc.id, data))
+
+            if not to_migrate:
+                st.success("Nothing to migrate!")
+            else:
+                progress_bar = st.progress(0)
+                result_rows = []
+
+                for i, (doc_id, data) in enumerate(to_migrate):
+                    name = data.get("name", doc_id)
+                    raw_value = (data.get("icon") or "").strip()
+
+                    try:
+                        # Handle both data URI format and raw base64
+                        if raw_value.startswith("data:"):
+                            # e.g. "data:image/png;base64,iVBOR..."
+                            header, b64_data = raw_value.split(",", 1)
+                            mime_type = header.split(":")[1].split(";")[0]  # "image/png"
+                        else:
+                            # Raw base64 with no header — assume PNG
+                            b64_data = raw_value
+                            mime_type = "image/png"
+
+                        file_bytes = b64lib.b64decode(b64_data)
+
+                        # Upload to Firebase Storage
+                        with st.spinner(f"Uploading '{name}'..."):
+                            new_url = upload_icon_to_storage(file_bytes, mime_type, name)
+
+                        # Write https:// URL back to both fields in Firestore
+                        db.collection("job_categories").document(doc_id).update({
+                            "iconUrl": new_url,  # Flutter reads this first
+                            "icon": new_url,     # overwrite base64 with URL for safety
+                        })
+
+                        result_rows.append({
+                            "Category": name,
+                            "Result": "✅ Migrated",
+                            "New URL": new_url
+                        })
+
+                    except Exception as e:
+                        result_rows.append({
+                            "Category": name,
+                            "Result": f"❌ Failed: {e}",
+                            "New URL": ""
+                        })
+
+                    progress_bar.progress((i + 1) / len(to_migrate))
+
+                st.success(f"Done! Migrated {sum(1 for r in result_rows if r['Result'].startswith('✅'))} / {len(to_migrate)} categories.")
+                st.cache_data.clear()
+
+                # Show results with previews
+                st.markdown("#### Migration Results")
+                for row in result_rows:
+                    col_name, col_status, col_img = st.columns([3, 3, 1])
+                    col_name.write(row["Category"])
+                    col_status.write(row["Result"])
+                    if row["New URL"]:
+                        col_img.image(row["New URL"], width=48)
+
+                st.info(":iphone: Open your Flutter app — icons will appear within seconds via the live Firestore stream. No app update needed.")
+
 # ====================== Settings ======================
 else:
     st.header(":gear: Settings & Info")
@@ -951,8 +1053,9 @@ else:
     st.info("""
     :white_check_mark: Icons uploaded to **Firebase Storage** → stored as `https://` URLs in Firestore
     :white_check_mark: Flutter's `CachedNetworkImage` works directly with these URLs — no changes needed in app
-    :white_check_mark: Old base64 categories still display in admin (via `icon` fallback field)
+    :white_check_mark: Run **Job Categories → Fix Old Icons** tab once to migrate any existing base64 icons
     :white_check_mark: Delete category also cleans up the Storage file
+    :white_check_mark: `delete_old_icon_from_storage` slice bug fixed (was `[n]` → now `[n:]`)
     :white_check_mark: All features working
     """)
 
