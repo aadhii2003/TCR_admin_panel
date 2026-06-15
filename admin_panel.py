@@ -107,7 +107,7 @@ if not firebase_admin._apps:
         st.stop()
 
 db = firestore.client()
-bucket = storage.bucket(bucket_name)   # ← This fixes the 'bucket' not defined error
+bucket = storage.bucket("tcr-app-3ca2e.firebasestorage.app")  # Explicit bucket name
 
 # ====================== Helper Functions ======================
 MAX_ICON_SIZE_MB = 5
