@@ -45,7 +45,7 @@ st.markdown("---")
 # ====================== Firebase Init ======================
 # _BUCKET_NAME is set once here and passed explicitly to every storage.bucket() call.
 # This avoids the "Storage bucket name not specified" error on Streamlit reruns.
-_BUCKET_NAME = ""
+_BUCKET_NAME = "tcr-app-3ca2e.firebasestorage.app"
 
 if not firebase_admin._apps:
     try:
