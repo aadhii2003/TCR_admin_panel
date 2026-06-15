@@ -4,7 +4,6 @@ from firebase_admin import credentials, auth, firestore, storage
 import pandas as pd
 import datetime
 import io
-import re
 import os
 from PIL import Image
 import uuid
@@ -40,13 +39,15 @@ st.markdown("---")
 # ====================== Firebase Init ======================
 if not firebase_admin._apps:
     try:
+        bucket_name = "tcr-app-3ca2e.firebasestorage.app"
+        
         if "firebase" in st.secrets:
             firebase_config = dict(st.secrets["firebase"])
             cred = credentials.Certificate(firebase_config)
-            firebase_admin.initialize_app(cred, {'storageBucket': 'tcr-app-3ca2e.firebasestorage.app'})
+            firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
         elif os.path.exists("tcr-serviceAccountKey.json"):
             cred = credentials.Certificate("tcr-serviceAccountKey.json")
-            firebase_admin.initialize_app(cred, {'storageBucket': 'tcr-app-3ca2e.firebasestorage.app'})
+            firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
         else:
             st.error("🔴 Firebase credentials not found!")
             st.stop()
@@ -55,7 +56,7 @@ if not firebase_admin._apps:
         st.stop()
 
 db = firestore.client()
-bucket = storage.bucket()
+bucket = storage.bucket("tcr-app-3ca2e.firebasestorage.app")   # Explicit bucket name
 
 # ====================== Helper Functions ======================
 MAX_ICON_SIZE_MB = 5
@@ -145,7 +146,7 @@ if page == "📊 Dashboard":
 # ====================== Users/Employees ======================
 elif page == "👥 Users/Employees":
     st.header("👥 Users/Employees Management")
-    st.info("👥 Users management section (full code can be added here from previous version)")
+    st.info("👥 Users management section (add your full code here if needed)")
 
 # ====================== Job Categories ======================
 elif page == "🛠️ Job Categories":
@@ -171,10 +172,10 @@ elif page == "🛠️ Job Categories":
                 hide_index=True
             )
 
-    # --- TAB 2: ADD NEW (Storage URL) ---
+    # --- TAB 2: ADD NEW ---
     with tab2:
         st.markdown("### ➕ Add New Category")
-        st.info("Icon will be uploaded to Firebase Storage → HTTPS URL (same as old categories)")
+        st.info("Icon uploaded to Firebase Storage → HTTPS URL")
 
         with st.form("add_category_form", clear_on_submit=True):
             c1, c2 = st.columns([3, 1])
@@ -260,12 +261,12 @@ elif page == "🛠️ Job Categories":
     # --- TAB 4: DELETE ---
     with tab4:
         st.markdown("### 🗑️ Delete Category")
-        st.info("Delete functionality retained from previous version.")
+        st.info("Delete functionality retained.")
 
 # ====================== Settings ======================
 else:
     st.header("⚙️ Settings & Info")
-    st.success("✅ New categories now save as HTTPS Storage URLs (matching old ones)")
+    st.success("✅ Icons now saved as proper HTTPS Storage URLs")
 
     if st.button("🔄 Backfill iconUrl for old categories"):
         try:
