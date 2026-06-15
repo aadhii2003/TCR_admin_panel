@@ -1,7 +1,6 @@
 import streamlit as st
 import firebase_admin
-from firebase_admin import credentials, auth, firestore
-import pandas as pd
+from firebase_admin import credentials, auth, firestore, storage
 import base64
 import datetime
 import io
@@ -84,19 +83,21 @@ st.markdown("---")
 # ====================== Firebase Init ======================
 if not firebase_admin._apps:
     try:
+        bucket_name = "tcr-app-3ca2e.firebasestorage.app"
+        
         if "firebase" in st.secrets:
             firebase_config = dict(st.secrets["firebase"])
             cred = credentials.Certificate(firebase_config)
-            firebase_admin.initialize_app(cred)
+            firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
         elif "project_id" in st.secrets:
             firebase_config = {k: st.secrets[k] for k in ["type", "project_id", "private_key_id", "private_key",
                                                          "client_email", "client_id", "auth_uri", "token_uri",
                                                          "auth_provider_x509_cert_url", "client_x509_cert_url"]}
             cred = credentials.Certificate(firebase_config)
-            firebase_admin.initialize_app(cred)
+            firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
         elif os.path.exists("tcr-serviceAccountKey.json"):
             cred = credentials.Certificate("tcr-serviceAccountKey.json")
-            firebase_admin.initialize_app(cred)
+            firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
         else:
             st.error("🔴 Firebase credentials not found!")
             st.info("Please add your Firebase service account JSON content to Streamlit Cloud Secrets.")
@@ -106,6 +107,7 @@ if not firebase_admin._apps:
         st.stop()
 
 db = firestore.client()
+bucket = storage.bucket(bucket_name)   # ← This fixes the 'bucket' not defined error
 
 # ====================== Helper Functions ======================
 MAX_ICON_SIZE_MB = 5
@@ -726,7 +728,7 @@ elif page == "🛠️ Job Categories":
 
     tab1, tab2, tab3, tab4 = st.tabs(["📂 View All", "➕ Add New", "✏️ Edit Existing", "🗑️ Delete"])
 
-    # --- TAB 1: VIEW --- (unchanged)
+    # --- TAB 1: VIEW ---
     with tab1:
         st.markdown("### All Job Categories")
         search_cat = st.text_input("Search Categories", placeholder="Type to filter...", key="search_cat_main")
@@ -766,10 +768,10 @@ elif page == "🛠️ Job Categories":
         else:
             st.info("No job categories found.")
 
-    # --- TAB 2: ADD NEW (UPDATED - Now uses Storage HTTPS URL) ---
+    # --- TAB 2: ADD NEW (Fixed - Uses Storage) ---
     with tab2:
         st.markdown("### ➕ Add New Category")
-        st.info("Icon will be uploaded to Firebase Storage and saved as HTTPS URL (same as old categories).")
+        st.info("Icon will be uploaded to Firebase Storage → HTTPS URL (same as old categories).")
 
         with st.form("add_category_form", clear_on_submit=True):
             c1, c2 = st.columns([3, 1])
@@ -815,7 +817,7 @@ elif page == "🛠️ Job Categories":
                         st.error(f"Error: {str(e)}")
                         st.exception(e)
 
-    # --- TAB 3: EDIT (UPDATED) ---
+    # --- TAB 3: EDIT (Fixed) ---
     with tab3:
         st.markdown("### ✏️ Edit Existing Category")
         if not categories:
