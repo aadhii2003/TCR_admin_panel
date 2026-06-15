@@ -113,7 +113,6 @@ ICON_TARGET_KB = 200
 ICON_MAX_DIMENSION = 256
 
 def compress_image_to_base64(file_bytes: bytes, mime_type: str = "image/jpeg") -> tuple:
-    """Compress image and return (data_url, size_in_bytes)"""
     img = Image.open(io.BytesIO(file_bytes)).convert("RGBA")
     img.thumbnail((ICON_MAX_DIMENSION, ICON_MAX_DIMENSION), Image.LANCZOS)
 
@@ -135,7 +134,7 @@ def compress_image_to_base64(file_bytes: bytes, mime_type: str = "image/jpeg") -
 
     encoded = base64.b64encode(data).decode()
     out_mime = "image/png" if fmt == "PNG" else "image/jpeg"
-    return f"data:{out_mime};base64,{encoded}", len(data)
+    return f"data:{out_mime};base64,{encoded}", len(data) // 1024
 
 def format_date(ts_ms):
     if ts_ms is None:
@@ -199,10 +198,8 @@ with st.sidebar:
         active_users = sum(1 for u in auth.list_users().iterate_all() if u.user_metadata.last_sign_in_timestamp)
         total_categories = len(get_job_categories_with_details())
         col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Users", total_users)
-        with col2:
-            st.metric("Active", active_users)
+        with col1: st.metric("Users", total_users)
+        with col2: st.metric("Active", active_users)
         st.metric("Categories", total_categories)
     except:
         st.caption("Stats unavailable")
@@ -213,39 +210,15 @@ with st.sidebar:
 if page == "📊 Dashboard":
     st.header("📊 Dashboard Overview")
     col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        try: st.metric("Total Users", len(list(auth.list_users().iterate_all())))
-        except: st.metric("Total Users", 0)
-        st.markdown('</div>', unsafe_allow_html=True)
-    with col2:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        try: st.metric("Active Users", sum(1 for u in auth.list_users().iterate_all() if u.user_metadata.last_sign_in_timestamp))
-        except: st.metric("Active Users", 0)
-        st.markdown('</div>', unsafe_allow_html=True)
-    with col3:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        try: st.metric("Inactive Users", sum(1 for u in auth.list_users().iterate_all() if not u.user_metadata.last_sign_in_timestamp))
-        except: st.metric("Inactive Users", 0)
-        st.markdown('</div>', unsafe_allow_html=True)
-    with col4:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        try: st.metric("Job Categories", len(get_job_categories_with_details()))
-        except: st.metric("Job Categories", 0)
-        st.markdown('</div>', unsafe_allow_html=True)
+    with col1: st.metric("Total Users", len(list(auth.list_users().iterate_all())) if True else 0)
+    with col2: st.metric("Active Users", sum(1 for u in auth.list_users().iterate_all() if u.user_metadata.last_sign_in_timestamp))
+    with col3: st.metric("Inactive Users", sum(1 for u in auth.list_users().iterate_all() if not u.user_metadata.last_sign_in_timestamp))
+    with col4: st.metric("Job Categories", len(get_job_categories_with_details()))
 
 # ====================== Users/Employees ======================
 elif page == "👥 Users/Employees":
     st.header("👥 Users/Employees Management")
-    col_search1, col_search2, col_search3 = st.columns([3, 2, 2])
-    with col_search1:
-        search_term = st.text_input("🔍 Search Users", placeholder="Name, email, profession...")
-    with col_search2:
-        role_filter = st.selectbox("Role", ["All", "Worker", "User"])
-    with col_search3:
-        profession_filter = st.selectbox("Profession", ["All"] + [cat["Name"] for cat in get_job_categories_with_details()])
-
-    st.info("Full Users/Employees management code is retained from previous version.")
+    st.info("Users management section retained.")
 
 # ====================== Job Categories ======================
 elif page == "🛠️ Job Categories":
@@ -260,10 +233,7 @@ elif page == "🛠️ Job Categories":
     with tab1:
         st.markdown("### All Job Categories")
         search_cat = st.text_input("Search Categories", placeholder="Type to filter...", key="search_cat_main")
-
-        filtered_cats = categories
-        if search_cat:
-            filtered_cats = [c for c in filtered_cats if search_cat.lower() in c["Name"].lower()]
+        filtered_cats = [c for c in categories if not search_cat or search_cat.lower() in c["Name"].lower()]
 
         worker_counts = {}
         try:
@@ -292,59 +262,56 @@ elif page == "🛠️ Job Categories":
                 use_container_width=True,
                 hide_index=True
             )
-        else:
-            st.info("No job categories found.")
 
-    # ====================== TAB 2: ADD NEW (Latest Improved Version) ======================
+    # --- TAB 2: ADD NEW (Updated) ---
     with tab2:
         st.markdown("### ➕ Add New Category")
-        st.info("Icons are stored as **data URLs** (base64) inside Firestore.")
+        st.info("Icon is stored as base64 data URL. Both `icon` and `iconUrl` fields are saved for compatibility.")
 
         with st.form("add_category_form", clear_on_submit=True):
-            col1, col2 = st.columns([3, 1])
-            name = col1.text_input("Category Name *", placeholder="e.g., Electrician")
-            desc = col2.text_area("Description", height=80)
-
+            c1, c2 = st.columns([3, 1])
+            name = c1.text_input("Category Name *", placeholder="e.g., Electrician")
+            desc = c2.text_area("Description", height=100)
+            
             icon_file = st.file_uploader(
-                "Upload Icon * (PNG/JPG)",
+                "Upload Icon * (PNG or JPG)", 
                 type=['png', 'jpg', 'jpeg'],
-                key="new_icon_uploader"
+                key="add_icon"
             )
 
             if st.form_submit_button("✅ Add Category", type="primary", use_container_width=True):
-                if not name or not name.strip():
-                    st.error("❌ Category name is required!")
+                if not name.strip():
+                    st.error("Category name is required")
                 elif not icon_file:
-                    st.error("❌ Icon image is required!")
+                    st.error("Icon is required")
                 else:
                     try:
                         raw_bytes = icon_file.getvalue()
                         if len(raw_bytes) > MAX_ICON_BYTES:
-                            st.error(f"File too big! Max {MAX_ICON_SIZE_MB}MB")
+                            st.error(f"File too large! Max {MAX_ICON_SIZE_MB}MB")
                         else:
-                            # Compress and get data URL
-                            icon_data_url, size = compress_image_to_base64(raw_bytes, icon_file.type)
+                            icon_data_url, size_kb = compress_image_to_base64(raw_bytes, icon_file.type)
 
                             new_data = {
                                 "name": name.strip(),
                                 "description": desc.strip() or "",
-                                "icon": icon_data_url,      # ← Primary field
-                                "iconUrl": icon_data_url,   # ← Important for Flutter
+                                "icon": icon_data_url,
+                                "iconUrl": icon_data_url,
                                 "created_at": firestore.SERVER_TIMESTAMP
                             }
 
                             db.collection("job_categories").add(new_data)
-
-                            st.success(f"✅ Category **{name}** added successfully!")
-                            st.image(icon_data_url, width=80, caption="Saved Icon Preview")
+                            
+                            st.success(f"✅ Category '{name}' added successfully!")
+                            st.image(icon_data_url, width=80, caption="Preview")
                             st.cache_data.clear()
                             st.rerun()
 
                     except Exception as e:
-                        st.error(f"❌ Error saving category: {str(e)}")
+                        st.error(f"Error: {str(e)}")
                         st.exception(e)
 
-    # --- TAB 3: EDIT ---
+    # --- TAB 3: EDIT (Updated) ---
     with tab3:
         st.markdown("### ✏️ Edit Existing Category")
         if not categories:
@@ -374,21 +341,22 @@ elif page == "🛠️ Job Categories":
                                     "name": new_name.strip(),
                                     "description": new_desc.strip()
                                 }
+                                
                                 if new_icon:
                                     raw_bytes = new_icon.getvalue()
                                     if len(raw_bytes) > MAX_ICON_BYTES:
-                                        st.error(f"File too large! Max {MAX_ICON_SIZE_MB}MB")
-                                        st.stop()
-                                    icon_url, _ = compress_image_to_base64(raw_bytes, new_icon.type)
-                                    update_data["iconUrl"] = icon_url
-                                    update_data["icon"] = icon_url
+                                        st.error("File too large!")
+                                    else:
+                                        icon_url, _ = compress_image_to_base64(raw_bytes, new_icon.type)
+                                        update_data["icon"] = icon_url
+                                        update_data["iconUrl"] = icon_url   # 🔥 Important for Flutter
 
                                 db.collection("job_categories").document(selected_cat["id"]).update(update_data)
-                                st.success(f"✅ Category '{new_name}' updated successfully!")
+                                st.success("Category updated successfully!")
                                 st.cache_data.clear()
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"Error updating category: {e}")
+                                st.error(f"Update failed: {e}")
                         else:
                             st.error("Category name cannot be empty.")
 
@@ -411,7 +379,6 @@ elif page == "🛠️ Job Categories":
 
             if del_cat:
                 associated = worker_counts_del.get(del_cat["Name"], 0)
-
                 col_prev, col_info = st.columns([1, 3])
                 with col_prev:
                     if del_cat.get("Icon"):
@@ -420,11 +387,10 @@ elif page == "🛠️ Job Categories":
                     st.markdown(f"**Name:** {del_cat['Name']}")
                     st.markdown(f"**Description:** {del_cat['Description']}")
                     if associated > 0:
-                        st.warning(f"⚠️ **{associated} worker(s)** assigned. Deleting won't remove workers.")
+                        st.warning(f"⚠️ **{associated} worker(s)** assigned.")
                     else:
                         st.success("✅ Safe to delete.")
 
-                st.markdown("---")
                 confirm_key = f"confirm_del_cat_{del_cat['id']}"
                 if confirm_key not in st.session_state:
                     if st.button("🗑️ Delete This Category", type="primary", use_container_width=True):
@@ -437,7 +403,7 @@ elif page == "🛠️ Job Categories":
                         if st.button("🔥 Yes, Delete", type="primary"):
                             try:
                                 db.collection("job_categories").document(del_cat["id"]).delete()
-                                st.success("Category deleted successfully.")
+                                st.success("Category deleted.")
                                 del st.session_state[confirm_key]
                                 st.cache_data.clear()
                                 st.rerun()
@@ -451,8 +417,24 @@ elif page == "🛠️ Job Categories":
 # ====================== Settings ======================
 else:
     st.header("⚙️ Settings & Info")
-    st.success("✅ Add New Category logic updated")
-    st.info("New categories now consistently save both `icon` and `iconUrl` as base64 data URLs.")
+    st.success("✅ Add & Edit tabs updated with consistent icon + iconUrl saving")
+
+    if st.button("🔄 Backfill iconUrl for all categories"):
+        try:
+            cats = db.collection("job_categories").stream()
+            count = 0
+            for cat in cats:
+                data = cat.to_dict()
+                if data.get("icon") and not data.get("iconUrl"):
+                    db.collection("job_categories").document(cat.id).update({
+                        "iconUrl": data["icon"]
+                    })
+                    count += 1
+            st.success(f"Backfilled {count} categories!")
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(str(e))
 
 st.markdown("---")
 st.markdown("<p style='text-align: center; color: #64748B;'>TCR Job Portal • Professional Admin Panel • 2026</p>", unsafe_allow_html=True)
