@@ -86,7 +86,6 @@ if not firebase_admin._apps:
     try:
         if "firebase" in st.secrets:
             firebase_config = dict(st.secrets["firebase"])
-            # storageBucket must be in secrets too, e.g. "tcr-app-3ca2e.appspot.com"
             bucket_name = firebase_config.pop("storageBucket", None) or st.secrets.get("storageBucket", "")
             cred = credentials.Certificate(firebase_config)
             firebase_admin.initialize_app(cred, {"storageBucket": bucket_name})
@@ -115,15 +114,13 @@ if not firebase_admin._apps:
 db = firestore.client()
 
 # ====================== Storage Upload Helper ======================
-# ─────────────────────────────────────────────────────────────────
-# FIX: Upload icon to Firebase Storage → get a public https:// URL
-# Flutter's CachedNetworkImage needs an https:// URL, NOT base64.
-# Old approach (base64 in Firestore) caused icons to never show in app.
-# ─────────────────────────────────────────────────────────────────
+# Flutter's CachedNetworkImage needs an https:// URL.
+# Icons are uploaded to Firebase Storage → public URL saved as "iconUrl" in Firestore.
+# The old "icon" field (base64 or legacy URL) is NO LONGER written for new/edited categories.
 
 MAX_ICON_SIZE_MB = 5
 MAX_ICON_BYTES = MAX_ICON_SIZE_MB * 1024 * 1024
-ICON_MAX_DIMENSION = 256  # px — icons are small, 256px is plenty
+ICON_MAX_DIMENSION = 256  # px
 
 
 def resize_image_bytes(file_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
@@ -148,21 +145,18 @@ def resize_image_bytes(file_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
 
 def upload_icon_to_storage(file_bytes: bytes, mime_type: str, category_name: str) -> str:
     """
-    Upload a category icon to Firebase Storage under category_icons/<uuid>.<ext>
-    Returns the public https:// download URL that Flutter can use directly.
+    Upload a category icon to Firebase Storage under category_icons/<safe_name>_<uuid>.<ext>
+    Returns the public https:// download URL saved as 'iconUrl' in Firestore.
     """
     resized_bytes, final_mime = resize_image_bytes(file_bytes, mime_type)
     ext = "png" if final_mime == "image/png" else "jpg"
 
-    # Unique filename so re-uploads don't collide
     safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', category_name.strip().lower())
     filename = f"category_icons/{safe_name}_{uuid.uuid4().hex[:8]}.{ext}"
 
     bucket = storage.bucket()
     blob = bucket.blob(filename)
     blob.upload_from_string(resized_bytes, content_type=final_mime)
-
-    # Make the file publicly readable so Flutter can fetch it without auth
     blob.make_public()
 
     return blob.public_url  # "https://storage.googleapis.com/..."
@@ -170,21 +164,18 @@ def upload_icon_to_storage(file_bytes: bytes, mime_type: str, category_name: str
 
 def delete_old_icon_from_storage(icon_url: str):
     """
-    If the existing iconUrl is a Firebase Storage URL, delete the old file
+    If the existing iconUrl is a Firebase Storage public URL, delete the old blob
     to avoid orphaned objects piling up in Storage.
     """
     try:
-        if "storage.googleapis.com" not in icon_url:
-            return  # not a Storage URL (could be old base64 or placeholder), skip
-        # Extract blob path from URL: .../o/<encoded_path>?alt=...
-        # For public URLs the format is:
-        # https://storage.googleapis.com/<bucket>/<path>
+        if not icon_url or "storage.googleapis.com" not in icon_url:
+            return  # not a Storage URL (legacy base64 or placeholder) — skip
         bucket_name = storage.bucket().name
         prefix = f"https://storage.googleapis.com/{bucket_name}/"
         if icon_url.startswith(prefix):
-            blob_path = icon_url[len(prefix)].split("?")[0]
-            bucket = storage.bucket()
-            blob = bucket.blob(blob_path)
+            # FIX: use slice [len(prefix):] not index [len(prefix)]
+            blob_path = icon_url[len(prefix):].split("?")[0]
+            blob = storage.bucket().blob(blob_path)
             blob.delete()
     except Exception:
         pass  # non-critical, don't break the UI
@@ -254,6 +245,7 @@ def get_job_categories_with_details():
         for doc in docs:
             data = doc.to_dict()
             name = data.get("name", "").strip()
+            # Prefer iconUrl (https:// Storage URL) — fall back to legacy icon field
             icon = data.get("iconUrl") or data.get("icon")
             if name:
                 categories.append({
@@ -766,6 +758,7 @@ elif page == ":hammer_and_wrench: Job Categories":
                 table_data.append({
                     "Icon": cat["Icon"],
                     "Category Name": cat["Name"],
+                    "Icon URL": cat["Icon"] or "—",
                     "Associated Workers": worker_counts.get(cat["Name"], 0),
                     "Description": cat["Description"]
                 })
@@ -774,6 +767,7 @@ elif page == ":hammer_and_wrench: Job Categories":
                 column_config={
                     "Icon": st.column_config.ImageColumn("Icon", width="small"),
                     "Category Name": st.column_config.TextColumn("Category Name"),
+                    "Icon URL": st.column_config.TextColumn("Icon URL (iconUrl field)"),
                     "Associated Workers": st.column_config.NumberColumn("Workers", format="%d"),
                     "Description": st.column_config.TextColumn("Description")
                 },
@@ -787,8 +781,8 @@ elif page == ":hammer_and_wrench: Job Categories":
     with tab2:
         st.markdown("### Add New Category")
         st.info(
-            ":pushpin: Icon is uploaded to **Firebase Storage** and stored as an `https://` URL. "
-            "This is what your Flutter app reads — no base64 involved."
+            ":pushpin: Icon is uploaded to **Firebase Storage** → public `https://` URL is saved as **`iconUrl`** in Firestore. "
+            "Flutter reads this field directly with `CachedNetworkImage`."
         )
 
         with st.form("add_category_form"):
@@ -809,17 +803,19 @@ elif page == ":hammer_and_wrench: Job Categories":
                     else:
                         try:
                             with st.spinner("Uploading icon to Firebase Storage..."):
-                                # ✅ FIX: upload to Storage → get https:// URL
                                 icon_url = upload_icon_to_storage(raw_bytes, icon.type, name)
 
+                            # ✅ Save ONLY iconUrl — clean https:// URL, no base64, no legacy "icon" field
                             db.collection("job_categories").add({
                                 "name": name.strip(),
                                 "description": desc.strip(),
-                                "iconUrl": icon_url,   # https:// URL — Flutter reads this
-                                "icon": icon_url,      # same URL in both fields for compatibility
+                                "iconUrl": icon_url,        # ← the ONLY image field written
                                 "created_at": firestore.SERVER_TIMESTAMP
                             })
-                            st.success(f":white_check_mark: Category '{name}' added! Icon stored at Storage URL — will display in Flutter app immediately.")
+                            st.success(
+                                f":white_check_mark: Category **'{name}'** added!\n\n"
+                                f":link: `iconUrl` → `{icon_url}`"
+                            )
                             st.cache_data.clear()
                             st.rerun()
                         except Exception as e:
@@ -839,13 +835,16 @@ elif page == ":hammer_and_wrench: Job Categories":
             if selected_cat:
                 with st.form("edit_category_form"):
                     st.info(f"Editing: **{selected_cat['Name']}**")
+                    if selected_cat['Icon']:
+                        st.markdown(f"**Current `iconUrl`:** `{selected_cat['Icon']}`")
+                        st.image(selected_cat['Icon'], width=60, caption="Current icon")
+                    else:
+                        st.warning("No icon set for this category.")
+
                     new_name = st.text_input("Category Name", value=selected_cat['Name'])
                     new_desc = st.text_area("Description", value=selected_cat['Description'])
-                    st.markdown("**Current Icon:**")
-                    if selected_cat['Icon']:
-                        st.image(selected_cat['Icon'], width=60)
                     new_icon = st.file_uploader(
-                        f"Upload New Icon (Optional • max {MAX_ICON_SIZE_MB}MB)",
+                        f"Upload New Icon (Optional • max {MAX_ICON_SIZE_MB}MB • replaces current)",
                         type=['png', 'jpg', 'jpeg'],
                         key="edit_cat_icon"
                     )
@@ -864,17 +863,21 @@ elif page == ":hammer_and_wrench: Job Categories":
                                         st.stop()
 
                                     with st.spinner("Uploading new icon to Firebase Storage..."):
-                                        # ✅ FIX: upload to Storage → get https:// URL
                                         icon_url = upload_icon_to_storage(raw_bytes, new_icon.type, new_name)
-                                        # Clean up the old Storage file if it was one
+                                        # Clean up the old Storage file if it was a Storage URL
                                         if selected_cat['Icon']:
                                             delete_old_icon_from_storage(selected_cat['Icon'])
 
+                                    # ✅ Update ONLY iconUrl — remove stale "icon" field if it exists
                                     update_data["iconUrl"] = icon_url
-                                    update_data["icon"] = icon_url
+                                    # Explicitly clear any legacy "icon" base64 field
+                                    update_data["icon"] = firestore.DELETE_FIELD
 
                                 db.collection("job_categories").document(selected_cat["id"]).update(update_data)
-                                st.success(f":white_check_mark: Category '{new_name}' updated successfully!")
+                                st.success(
+                                    f":white_check_mark: Category **'{new_name}'** updated!"
+                                    + (f"\n\n:link: New `iconUrl` → `{update_data.get('iconUrl', '(unchanged)')}`" if new_icon else "")
+                                )
                                 st.cache_data.clear()
                                 st.rerun()
                             except Exception as e:
@@ -907,14 +910,15 @@ elif page == ":hammer_and_wrench: Job Categories":
                     if del_cat["Icon"]:
                         st.image(del_cat["Icon"], width=80)
                 with col_info:
-                    st.markdown(f"Name: {del_cat['Name']}")
-                    st.markdown(f"Description: {del_cat['Description']}")
+                    st.markdown(f"**Name:** {del_cat['Name']}")
+                    st.markdown(f"**Description:** {del_cat['Description']}")
+                    if del_cat["Icon"]:
+                        st.markdown(f"**`iconUrl`:** `{del_cat['Icon']}`")
                     if associated > 0:
-                        st.warning(f":warning: {associated} worker(s) are currently assigned to this category. "
-                                   f"Deleting the category will NOT delete those workers, but their profession field "
-                                   f"will become invalid.")
+                        st.warning(f":warning: {associated} worker(s) assigned to this category. "
+                                   f"Their `profession` field will become invalid after deletion.")
                     else:
-                        st.success(":white_check_mark: No workers are assigned to this category. Safe to delete.")
+                        st.success(":white_check_mark: No workers assigned. Safe to delete.")
 
                 st.markdown("---")
 
@@ -924,16 +928,15 @@ elif page == ":hammer_and_wrench: Job Categories":
                         st.session_state[confirm_key] = True
                         st.rerun()
                 else:
-                    st.error(f":warning: Are you absolutely sure you want to delete '{del_cat['Name']}'? This cannot be undone.")
+                    st.error(f":warning: Are you absolutely sure you want to delete **'{del_cat['Name']}'**? This cannot be undone.")
                     c_yes, c_no = st.columns(2)
                     with c_yes:
                         if st.button(":fire: Yes, Delete It", type="primary", use_container_width=True):
                             try:
-                                # Also delete the icon from Storage
                                 if del_cat["Icon"]:
                                     delete_old_icon_from_storage(del_cat["Icon"])
                                 db.collection("job_categories").document(del_cat["id"]).delete()
-                                st.success(f":white_check_mark: Category '{del_cat['Name']}' deleted successfully.")
+                                st.success(f":white_check_mark: Category '{del_cat['Name']}' deleted and icon removed from Storage.")
                                 del st.session_state[confirm_key]
                                 st.cache_data.clear()
                                 st.rerun()
@@ -949,11 +952,12 @@ else:
     st.header(":gear: Settings & Info")
     st.success("Professional Admin Panel • 2026")
     st.info("""
-    :white_check_mark: Icons uploaded to **Firebase Storage** → stored as `https://` URLs in Firestore
-    :white_check_mark: Flutter's `CachedNetworkImage` works directly with these URLs — no changes needed in app
-    :white_check_mark: Old base64 categories still display in admin (via `icon` fallback field)
-    :white_check_mark: Delete category also cleans up the Storage file
-    :white_check_mark: All features working
+    :white_check_mark: Icons uploaded to **Firebase Storage** → stored as `https://` URLs
+    :white_check_mark: **Only `iconUrl` field is written** — no `icon` / base64 field for new categories
+    :white_check_mark: Edit page removes legacy `icon` field automatically when a new icon is uploaded
+    :white_check_mark: Flutter's `CachedNetworkImage` reads `iconUrl` directly — no app changes needed
+    :white_check_mark: Delete also cleans up the Storage blob (fixed slice bug in URL parsing)
+    :white_check_mark: View tab now shows the `iconUrl` value for verification
     """)
 
 st.markdown("---")
