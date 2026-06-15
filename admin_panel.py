@@ -8,6 +8,7 @@ import re
 import os
 from PIL import Image
 import uuid
+import pandas as pd
 
 # ====================== Page Config ======================
 st.set_page_config(
@@ -755,7 +756,7 @@ elif page == "🛠️ Job Categories":
                     "Description": cat["Description"]
                 })
             st.dataframe(
-                pd.DataFrame(table_data),
+                pd.DataFrame(table_data),   # ← This line was failing
                 column_config={
                     "Icon": st.column_config.ImageColumn("Icon", width="small"),
                     "Category Name": st.column_config.TextColumn("Category Name"),
@@ -768,7 +769,7 @@ elif page == "🛠️ Job Categories":
         else:
             st.info("No job categories found.")
 
-    # --- TAB 2: ADD NEW (Fixed - Uses Storage) ---
+    # --- TAB 2: ADD NEW ---
     with tab2:
         st.markdown("### ➕ Add New Category")
         st.info("Icon will be uploaded to Firebase Storage → HTTPS URL (same as old categories).")
@@ -817,7 +818,7 @@ elif page == "🛠️ Job Categories":
                         st.error(f"Error: {str(e)}")
                         st.exception(e)
 
-    # --- TAB 3: EDIT (Fixed) ---
+    # --- TAB 3: EDIT ---
     with tab3:
         st.markdown("### ✏️ Edit Existing Category")
         if not categories:
@@ -867,7 +868,7 @@ elif page == "🛠️ Job Categories":
                         else:
                             st.error("Category name cannot be empty.")
 
-    # --- TAB 4: DELETE (unchanged) ---
+    # --- TAB 4: DELETE ---
     with tab4:
         st.markdown("### 🗑️ Delete Category")
         if not categories:
