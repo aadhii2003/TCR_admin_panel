@@ -8,6 +8,7 @@ import io
 import re
 import os
 from PIL import Image
+import uuid
 
 # ====================== Page Config ======================
 st.set_page_config(
