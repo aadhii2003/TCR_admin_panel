@@ -85,15 +85,15 @@ st.markdown("---")
 if not firebase_admin._apps:
     try:
         bucket_name = "tcr-app-3ca2e.firebasestorage.app"
-        
+
         if "firebase" in st.secrets:
             firebase_config = dict(st.secrets["firebase"])
             cred = credentials.Certificate(firebase_config)
             firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
         elif "project_id" in st.secrets:
             firebase_config = {k: st.secrets[k] for k in ["type", "project_id", "private_key_id", "private_key",
-                                                         "client_email", "client_id", "auth_uri", "token_uri",
-                                                         "auth_provider_x509_cert_url", "client_x509_cert_url"]}
+                                                           "client_email", "client_id", "auth_uri", "token_uri",
+                                                           "auth_provider_x509_cert_url", "client_x509_cert_url"]}
             cred = credentials.Certificate(firebase_config)
             firebase_admin.initialize_app(cred, {'storageBucket': bucket_name})
         elif os.path.exists("tcr-serviceAccountKey.json"):
@@ -108,25 +108,28 @@ if not firebase_admin._apps:
         st.stop()
 
 db = firestore.client()
-bucket = storage.bucket("tcr-app-3ca2e.firebasestorage.app")  # Explicit bucket name
+bucket = storage.bucket("tcr-app-3ca2e.firebasestorage.app")
 
 # ====================== Helper Functions ======================
 MAX_ICON_SIZE_MB = 5
 MAX_ICON_BYTES = MAX_ICON_SIZE_MB * 1024 * 1024
-# Firestore document max is ~1MB. We compress icons to stay well under that.
-# Target compressed size: ~200KB (leaves room for other fields)
 ICON_TARGET_KB = 200
-ICON_MAX_DIMENSION = 256  # px — icons don't need to be large
+ICON_MAX_DIMENSION = 256
+
+def clean_nan(val, default=""):
+    """Convert 'nan' strings (from Excel read) to a clean default."""
+    if val is None:
+        return default
+    s = str(val).strip()
+    return default if s.lower() in ("nan", "none", "") else s
 
 def compress_image_to_bytes(file_bytes: bytes, mime_type: str) -> tuple:
     img = Image.open(io.BytesIO(file_bytes)).convert("RGBA")
     img.thumbnail((ICON_MAX_DIMENSION, ICON_MAX_DIMENSION), Image.LANCZOS)
-
     if mime_type in ("image/jpeg", "image/jpg"):
         background = Image.new("RGB", img.size, (255, 255, 255))
         background.paste(img, mask=img.split()[3] if img.mode == "RGBA" else None)
         img = background
-
     buf = io.BytesIO()
     fmt = "PNG" if mime_type == "image/png" else "JPEG"
     if fmt == "PNG":
@@ -144,22 +147,12 @@ def upload_to_storage(image_bytes: bytes, file_ext: str) -> str:
     return blob.public_url
 
 def compress_image_to_base64(file_bytes: bytes, mime_type: str = "image/jpeg") -> str:
-    """
-    Resize and compress an image so its base64 string stays under ~200KB.
-    Returns a data-URI string safe to store in Firestore.
-    """
     img = Image.open(io.BytesIO(file_bytes)).convert("RGBA")
-
-    # Resize to fit within ICON_MAX_DIMENSION × ICON_MAX_DIMENSION
     img.thumbnail((ICON_MAX_DIMENSION, ICON_MAX_DIMENSION), Image.LANCZOS)
-
-    # Convert RGBA → RGB for JPEG (JPEG doesn't support alpha)
     if mime_type in ("image/jpeg", "image/jpg"):
         background = Image.new("RGB", img.size, (255, 255, 255))
         background.paste(img, mask=img.split()[3] if img.mode == "RGBA" else None)
         img = background
-
-    # Save at decreasing quality until size is acceptable
     for quality in [85, 70, 55, 40, 25]:
         buf = io.BytesIO()
         fmt = "PNG" if mime_type == "image/png" else "JPEG"
@@ -169,12 +162,10 @@ def compress_image_to_base64(file_bytes: bytes, mime_type: str = "image/jpeg") -
             img.save(buf, format="JPEG", quality=quality, optimize=True)
         data = buf.getvalue()
         if len(data) <= ICON_TARGET_KB * 1024:
-            break  # small enough
-
+            break
     encoded = base64.b64encode(data).decode()
     out_mime = "image/png" if fmt == "PNG" else "image/jpeg"
     return f"data:{out_mime};base64,{encoded}", len(data)
-
 
 def format_date(ts_ms):
     if ts_ms is None:
@@ -202,19 +193,23 @@ def parse_coordinate(val):
     if pd.isna(val) or str(val).strip() == "":
         return 0.0
     s = str(val).strip()
-    try: return float(s)
-    except: pass
+    try:
+        return float(s)
+    except:
+        pass
     dms_match = re.search(r"(\d+)\D+(\d+)\D+(\d+(?:\.\d+)?)\D*([NSEW])", s, re.IGNORECASE)
     if dms_match:
         d, m, sv, direction = dms_match.groups()
-        dec = float(d) + float(m)/60 + float(sv)/3600
-        if direction.upper() in ['S', 'W']: dec = -dec
+        dec = float(d) + float(m) / 60 + float(sv) / 3600
+        if direction.upper() in ['S', 'W']:
+            dec = -dec
         return dec
     dir_match = re.search(r"(\d+(?:\.\d+)?)\D*([NSEW])", s, re.IGNORECASE)
     if dir_match:
         v, direction = dir_match.groups()
         dec = float(v)
-        if direction.upper() in ['S', 'W']: dec = -dec
+        if direction.upper() in ['S', 'W']:
+            dec = -dec
         return dec
     return None
 
@@ -284,23 +279,31 @@ if page == "📊 Dashboard":
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        try: st.metric("Total Users", len(list(auth.list_users().iterate_all())))
-        except: st.metric("Total Users", 0)
+        try:
+            st.metric("Total Users", len(list(auth.list_users().iterate_all())))
+        except:
+            st.metric("Total Users", 0)
         st.markdown('</div>', unsafe_allow_html=True)
     with col2:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        try: st.metric("Active Users", sum(1 for u in auth.list_users().iterate_all() if u.user_metadata.last_sign_in_timestamp))
-        except: st.metric("Active Users", 0)
+        try:
+            st.metric("Active Users", sum(1 for u in auth.list_users().iterate_all() if u.user_metadata.last_sign_in_timestamp))
+        except:
+            st.metric("Active Users", 0)
         st.markdown('</div>', unsafe_allow_html=True)
     with col3:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        try: st.metric("Inactive Users", sum(1 for u in auth.list_users().iterate_all() if not u.user_metadata.last_sign_in_timestamp))
-        except: st.metric("Inactive Users", 0)
+        try:
+            st.metric("Inactive Users", sum(1 for u in auth.list_users().iterate_all() if not u.user_metadata.last_sign_in_timestamp))
+        except:
+            st.metric("Inactive Users", 0)
         st.markdown('</div>', unsafe_allow_html=True)
     with col4:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        try: st.metric("Job Categories", len(get_job_categories_with_details()))
-        except: st.metric("Job Categories", 0)
+        try:
+            st.metric("Job Categories", len(get_job_categories_with_details()))
+        except:
+            st.metric("Job Categories", 0)
         st.markdown('</div>', unsafe_allow_html=True)
 
     col5, col6, col7, col8 = st.columns(4)
@@ -309,24 +312,27 @@ if page == "📊 Dashboard":
         try:
             worker_count = sum(1 for _ in db.collection("workers").stream())
             st.metric("Registered Workers", worker_count)
-        except: st.metric("Registered Workers", 0)
+        except:
+            st.metric("Registered Workers", 0)
         st.markdown('</div>', unsafe_allow_html=True)
     with col6:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         try:
             user_count = sum(1 for _ in db.collection("user_profiles").stream())
             st.metric("User Profiles", user_count)
-        except: st.metric("User Profiles", 0)
+        except:
+            st.metric("User Profiles", 0)
         st.markdown('</div>', unsafe_allow_html=True)
     with col7:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         try:
             seven_days_ago = datetime.datetime.now() - datetime.timedelta(days=7)
             recent = sum(1 for u in auth.list_users().iterate_all()
-                        if u.user_metadata.last_sign_in_timestamp and
-                        datetime.datetime.fromtimestamp(u.user_metadata.last_sign_in_timestamp / 1000) >= seven_days_ago)
+                         if u.user_metadata.last_sign_in_timestamp and
+                         datetime.datetime.fromtimestamp(u.user_metadata.last_sign_in_timestamp / 1000) >= seven_days_ago)
             st.metric("Active This Week", recent)
-        except: st.metric("Active This Week", 0)
+        except:
+            st.metric("Active This Week", 0)
         st.markdown('</div>', unsafe_allow_html=True)
     with col8:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
@@ -339,7 +345,8 @@ if page == "📊 Dashboard":
                     total_workers += 1
             avg = round(total_rating / total_workers, 2) if total_workers > 0 else 0
             st.metric("Avg Rating", f"{avg}★")
-        except: st.metric("Avg Rating", "0★")
+        except:
+            st.metric("Avg Rating", "0★")
         st.markdown('</div>', unsafe_allow_html=True)
 
 # ====================== Users/Employees ======================
@@ -359,8 +366,10 @@ elif page == "👥 Users/Employees":
     def get_full_profile(uid):
         worker = db.collection("workers").document(uid).get()
         user = db.collection("user_profiles").document(uid).get()
-        if worker.exists: return worker.to_dict(), "Worker"
-        if user.exists: return user.to_dict(), "User"
+        if worker.exists:
+            return worker.to_dict(), "Worker"
+        if user.exists:
+            return user.to_dict(), "User"
         return {}, "Unknown"
 
     @st.cache_data(ttl=60)
@@ -385,6 +394,14 @@ elif page == "👥 Users/Employees":
                     role = "⚠️ Orphaned (No Profile)"
 
                 last_sign_in = auth_user.user_metadata.last_sign_in_timestamp
+
+                # Handle both old (string) and new (array) profession fields
+                profession_raw = profile.get("professions") or profile.get("profession", "N/A")
+                if isinstance(profession_raw, list):
+                    profession_display = ", ".join(profession_raw) if profession_raw else "N/A"
+                else:
+                    profession_display = clean_value(profession_raw)
+
                 users_data.append({
                     "UID": uid,
                     "IsActive": last_sign_in is not None,
@@ -392,7 +409,7 @@ elif page == "👥 Users/Employees":
                     "Email": clean_value(auth_user.email),
                     "Role": role,
                     "Mobile": clean_value(profile.get("mobile", "N/A")),
-                    "Profession": clean_value(profile.get("profession", "N/A")),
+                    "Profession": profession_display,
                     "Hourly Rate": f"₹{profile.get('hourlyRate', 0)}" if profile.get('hourlyRate') else "N/A",
                     "Rating": f"{profile.get('rating', 0)}★",
                     "Experience": f"{profile.get('experienceYears', 0)} yrs",
@@ -415,7 +432,7 @@ elif page == "👥 Users/Employees":
                     continue
             if role_filter != "All" and u["Role"] != role_filter:
                 continue
-            if profession_filter != "All" and u["Profession"] != profession_filter:
+            if profession_filter != "All" and profession_filter.lower() not in u["Profession"].lower():
                 continue
             user_row = {**u, "Select": False}
             if u["IsActive"]:
@@ -443,26 +460,41 @@ elif page == "👥 Users/Employees":
                     st.image(photo if photo != "N/A" else DEFAULT_PHOTO, width=150, caption="Profile Photo")
                 with col2:
                     st.markdown(f"### {clean_value(profile.get('name', 'N/A'))}")
-                    st.markdown(f"**{role} • {clean_value(profile.get('profession', 'N/A'))}**")
+
+                    # Handle both profession formats
+                    prof_raw = profile.get("professions") or profile.get("profession", "N/A")
+                    prof_display = ", ".join(prof_raw) if isinstance(prof_raw, list) else clean_value(prof_raw)
+                    st.markdown(f"**{role} • {prof_display}**")
+
                     c1, c2, c3 = st.columns(3)
-                    with c1: st.markdown(f"⭐ {profile.get('rating', 0)} | 💼 {profile.get('totalJobs', 0)} jobs")
-                    with c2: st.markdown(f"💰 ₹{profile.get('hourlyRate', 0)}/hr")
-                    with c3: st.markdown(f"📅 {profile.get('experienceYears', 0)} yrs")
+                    with c1:
+                        st.markdown(f"⭐ {profile.get('rating', 0)} | 💼 {profile.get('totalJobs', 0)} jobs")
+                    with c2:
+                        st.markdown(f"💰 ₹{profile.get('hourlyRate', profile.get('dailyRate', 0))}/hr")
+                    with c3:
+                        st.markdown(f"📅 {profile.get('experienceYears', 0)} yrs")
 
                 st.markdown("---")
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    st.markdown("**Email**"); st.markdown(clean_value(profile.get("email", "N/A")))
-                    st.markdown("**Mobile**"); st.markdown(clean_value(profile.get("mobile", "N/A")))
-                    st.markdown("**Location**"); st.markdown(clean_value(profile.get("location", "N/A")))
+                    st.markdown("**Email**")
+                    st.markdown(clean_value(profile.get("email", "N/A")))
+                    st.markdown("**Mobile**")
+                    st.markdown(clean_value(profile.get("mobile", "N/A")))
+                    st.markdown("**Location**")
+                    st.markdown(clean_value(profile.get("location", "N/A")))
                 with c2:
-                    st.markdown("**Languages**"); st.markdown(list_to_string(profile.get("languages", [])))
+                    st.markdown("**Languages**")
+                    st.markdown(list_to_string(profile.get("languages", [])))
                     addr_parts = [str(profile.get(k, "")).strip() for k in ["address", "city", "state"]]
-                    address_full = ", ".join([p for p in addr_parts if p and p.lower() != "n/a" and p != "None"])
-                    st.markdown("**Address**"); st.markdown(address_full if address_full else "N/A")
+                    address_full = ", ".join([p for p in addr_parts if p and p.lower() not in ("n/a", "none", "nan", "")])
+                    st.markdown("**Address**")
+                    st.markdown(address_full if address_full else "N/A")
                 with c3:
-                    st.markdown("**About**"); st.markdown(f"_{clean_value(profile.get('about', 'No bio'))}_")
-                    st.markdown("**Status**"); st.markdown("✅ Available" if profile.get("isAvailable") else "❌ Not Available")
+                    st.markdown("**About**")
+                    st.markdown(f"_{clean_value(profile.get('about', 'No bio'))}_")
+                    st.markdown("**Status**")
+                    st.markdown("✅ Available" if profile.get("isAvailable") else "❌ Not Available")
 
                 col_btn1, col_btn2 = st.columns(2)
                 with col_btn1:
@@ -526,7 +558,7 @@ elif page == "👥 Users/Employees":
                 key="active_table"
             )
             selected = edited[edited["Select"]]
-            if st.button("👀 View Profile", type="primary", disabled=len(selected)!=1, use_container_width=True):
+            if st.button("👀 View Profile", type="primary", disabled=len(selected) != 1, use_container_width=True):
                 st.session_state.selected_uid = selected.iloc[0]["UID"]
                 st.rerun()
             st.dataframe(edited.drop(columns=["Select", "UID"]), use_container_width=True, hide_index=True)
@@ -545,11 +577,15 @@ elif page == "👥 Users/Employees":
     with tab3:
         st.markdown("### 📤 Bulk Import Workers from Excel")
 
-        worker_columns = ["name", "email", "mobile", "whatsapp", "address", "city", "state", "gender",
-                          "profession", "hourlyRate", "experienceYears", "about", "languages", "latitude", "longitude"]
+        worker_columns = [
+            "name", "email", "mobile", "whatsapp", "address", "city", "state", "gender",
+            "profession", "hourlyRate", "experienceYears", "about", "languages", "latitude", "longitude"
+        ]
         workers_df = pd.DataFrame(columns=worker_columns)
         job_categories = [cat["Name"] for cat in get_job_categories_with_details()]
-        reference_df = pd.DataFrame({"Available Job Categories": job_categories + [""] * max(0, 20 - len(job_categories))})
+        reference_df = pd.DataFrame({
+            "Available Job Categories": job_categories + [""] * max(0, 20 - len(job_categories))
+        })
 
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -581,14 +617,16 @@ elif page == "👥 Users/Employees":
                 try:
                     for user in auth.list_users().iterate_all():
                         existing_emails.add(user.email.lower())
-                except: pass
+                except:
+                    pass
                 try:
                     for doc in db.collection("workers").stream():
                         data = doc.to_dict()
                         mobile = str(data.get("mobile", "")).strip()
                         if mobile.isdigit() and len(mobile) == 10:
                             existing_mobiles.add(mobile)
-                except: pass
+                except:
+                    pass
 
                 professions = {cat["Name"].strip() for cat in get_job_categories_with_details()}
                 valid_rows = []
@@ -604,23 +642,23 @@ elif page == "👥 Users/Employees":
                     mobile = str(row_dict.get("mobile", "")).strip()
                     profession = str(row_dict.get("profession", "")).strip()
 
-                    if not name:
+                    if not name or name.lower() == "nan":
                         errors.append("Name is required")
-                    if not email:
+                    if not email or email.lower() == "nan":
                         errors.append("Email is required")
                     elif not is_valid_email(email):
                         errors.append("Invalid email format")
                     elif email in existing_emails:
                         errors.append("Email already exists in Authentication.")
 
-                    if not mobile:
+                    if not mobile or mobile.lower() == "nan":
                         errors.append("Mobile is required")
                     elif not mobile.isdigit() or len(mobile) != 10:
                         errors.append("Mobile must be exactly 10 digits")
                     elif mobile in existing_mobiles:
                         errors.append("Mobile number already registered")
 
-                    if not profession:
+                    if not profession or profession.lower() == "nan":
                         errors.append("Profession is required")
                     elif profession not in professions:
                         errors.append(f"Invalid profession: '{profession}' (check reference sheet)")
@@ -661,46 +699,91 @@ elif page == "👥 Users/Employees":
                             for row in valid_rows:
                                 try:
                                     user = auth.create_user(email=row["email"], password="TempPass123!")
+
                                     def safe_int(v):
-                                        try: return int(float(v)) if pd.notna(v) else 0
-                                        except: return 0
+                                        try:
+                                            return int(float(v)) if pd.notna(v) else 0
+                                        except:
+                                            return 0
+
                                     def safe_float(v):
                                         res = parse_coordinate(v)
                                         return res if res is not None else 0.0
 
                                     lat = safe_float(row.get("latitude"))
                                     lon = safe_float(row.get("longitude"))
-                                    location_obj = {"latitude": lat, "longitude": lon}
-                                    location_updated_at = datetime.datetime.now(
-                                        datetime.timezone(datetime.timedelta(hours=5, minutes=30))
-                                    ).isoformat()
+
+                                    profession_str = row["profession"].strip()
+                                    hourly = safe_int(row.get("hourlyRate"))
+
+                                    # Clean languages — remove "nan" entries
+                                    raw_langs = str(row.get("languages", ""))
+                                    languages = [
+                                        lang.strip()
+                                        for lang in raw_langs.split(",")
+                                        if lang.strip() and lang.strip().lower() != "nan"
+                                    ]
 
                                     worker_data = {
-                                        "name": row["name"],
-                                        "email": row["email"],
-                                        "mobile": str(row["mobile"]),
-                                        "whatsapp": str(row.get("whatsapp", "")),
-                                        "address": str(row.get("address", "")),
-                                        "city": str(row.get("city", "")),
-                                        "state": str(row.get("state", "")),
-                                        "gender": str(row.get("gender", "")),
-                                        "profession": row["profession"],
-                                        "hourlyRate": safe_int(row.get("hourlyRate")),
+                                        # ── Identity ──────────────────────────────────────
+                                        "uid":      user.uid,
+                                        "name":     row["name"],
+                                        "email":    row["email"],
+                                        "mobile":   str(row["mobile"]),
+                                        "whatsapp": clean_nan(row.get("whatsapp")),
+                                        "gender":   clean_nan(row.get("gender")),
+
+                                        # ── Address ───────────────────────────────────────
+                                        "address":  clean_nan(row.get("address")),
+                                        "city":     clean_nan(row.get("city")),
+                                        "state":    clean_nan(row.get("state")),
+                                        "district": clean_nan(row.get("city")),  # mirror city → district
+
+                                        # ── Professions (array — what the Flutter app queries) ──
+                                        "professions":      [profession_str],
+                                        "professionsLower": [profession_str.lower()],
+
+                                        # ── Rates ─────────────────────────────────────────
+                                        "hourlyRate": hourly,
+                                        "dailyRate":  hourly,
+                                        "rate":       hourly,
+                                        "rateType":   "hourly",
+
+                                        # ── Experience / Bio ──────────────────────────────
                                         "experienceYears": safe_int(row.get("experienceYears")),
-                                        "latitude": lat,
+                                        "about":           clean_nan(row.get("about")),
+                                        "languages":       languages,
+
+                                        # ── Location — GeoPoint (Flutter expects GeoPoint, not Map) ──
+                                        "latitude":  lat,
                                         "longitude": lon,
-                                        "location": location_obj,
-                                        "locationUpdatedAt": location_updated_at,
-                                        "about": str(row.get("about", "")),
-                                        "languages": [lang.strip() for lang in str(row.get("languages", "")).split(",") if lang.strip()],
+                                        "location":  firestore.GeoPoint(lat, lon),  # ← KEY FIX
+                                        "locationUpdatedAt": firestore.SERVER_TIMESTAMP,
+
+                                        # ── Profile flags (Flutter filters on these) ──────
+                                        "role":              "worker",
+                                        "isProfileComplete": True,   # ← app skips without this
+                                        "isAvailable":       True,
+                                        "isMobileActive":    False,
+                                        "isWhatsappActive":  False,
+                                        "privacyAccepted":         True,
+                                        "privacyAcceptedAt":       firestore.SERVER_TIMESTAMP,
+                                        "privacyAcceptedVersion":  "1.0.0",
+
+                                        # ── Stats / Media ─────────────────────────────────
                                         "profilePhoto": DEFAULT_PHOTO,
-                                        "isAvailable": True,
-                                        "rating": 0.0,
-                                        "totalJobs": 0,
-                                        "createdAt": firestore.SERVER_TIMESTAMP
+                                        "portfolio":    [],
+                                        "rating":       0.0,
+                                        "totalJobs":    0,
+
+                                        # ── Timestamps ────────────────────────────────────
+                                        "createdAt":          firestore.SERVER_TIMESTAMP,
+                                        "profileCompletedAt": firestore.SERVER_TIMESTAMP,
                                     }
+
                                     db.collection("workers").document(user.uid).set(worker_data)
                                     success_count += 1
+
                                 except Exception as e:
                                     st.error(f"Failed for {row['email']}: {str(e)}")
 
@@ -741,8 +824,16 @@ elif page == "🛠️ Job Categories":
         worker_counts = {}
         try:
             for doc in db.collection("workers").stream():
-                prof = doc.to_dict().get("profession", "").strip()
-                worker_counts[prof] = worker_counts.get(prof, 0) + 1
+                data = doc.to_dict()
+                # Support both old single-profession and new professions array
+                profs = data.get("professions") or []
+                if not profs:
+                    single = data.get("profession", "").strip()
+                    if single:
+                        profs = [single]
+                for p in profs:
+                    p = p.strip()
+                    worker_counts[p] = worker_counts.get(p, 0) + 1
         except:
             worker_counts = {}
 
@@ -756,7 +847,7 @@ elif page == "🛠️ Job Categories":
                     "Description": cat["Description"]
                 })
             st.dataframe(
-                pd.DataFrame(table_data),   # ← This line was failing
+                pd.DataFrame(table_data),
                 column_config={
                     "Icon": st.column_config.ImageColumn("Icon", width="small"),
                     "Category Name": st.column_config.TextColumn("Category Name"),
@@ -772,13 +863,13 @@ elif page == "🛠️ Job Categories":
     # --- TAB 2: ADD NEW ---
     with tab2:
         st.markdown("### ➕ Add New Category")
-        st.info("Icon will be uploaded to Firebase Storage → HTTPS URL (same as old categories).")
+        st.info("Icon will be uploaded to Firebase Storage → HTTPS URL.")
 
         with st.form("add_category_form", clear_on_submit=True):
             c1, c2 = st.columns([3, 1])
             name = c1.text_input("Category Name *", placeholder="e.g., Electrician")
             desc = c2.text_area("Description", height=100)
-            
+
             icon_file = st.file_uploader(
                 f"Upload Icon * (max {MAX_ICON_SIZE_MB}MB • PNG/JPG)",
                 type=['png', 'jpg', 'jpeg'],
@@ -877,8 +968,15 @@ elif page == "🛠️ Job Categories":
             worker_counts_del = {}
             try:
                 for doc in db.collection("workers").stream():
-                    prof = doc.to_dict().get("profession", "").strip()
-                    worker_counts_del[prof] = worker_counts_del.get(prof, 0) + 1
+                    data = doc.to_dict()
+                    profs = data.get("professions") or []
+                    if not profs:
+                        single = data.get("profession", "").strip()
+                        if single:
+                            profs = [single]
+                    for p in profs:
+                        p = p.strip()
+                        worker_counts_del[p] = worker_counts_del.get(p, 0) + 1
             except:
                 worker_counts_del = {}
 
@@ -897,10 +995,10 @@ elif page == "🛠️ Job Categories":
                     st.markdown(f"**Description:** {del_cat['Description']}")
                     if associated > 0:
                         st.warning(f"⚠️ **{associated} worker(s)** are currently assigned to this category. "
-                                   f"Deleting the category will NOT delete those workers, but their profession field "
+                                   f"Deleting it will NOT delete those workers, but their profession field "
                                    f"will become invalid.")
                     else:
-                        st.success("✅ No workers are assigned to this category. Safe to delete.")
+                        st.success("✅ No workers assigned. Safe to delete.")
 
                 st.markdown("---")
 
@@ -932,10 +1030,14 @@ else:
     st.header("⚙️ Settings & Info")
     st.success("Professional Admin Panel • 2026")
     st.info("""
+    ✅ location saved as GeoPoint (fixes Flutter geo queries)
+    ✅ professions saved as array + professionsLower (fixes Flutter .where() filter)
+    ✅ isProfileComplete = True (fixes Flutter profile visibility)
+    ✅ role = "worker" saved on every bulk-imported worker
+    ✅ nan strings cleaned from address / city / state / about / languages
     ✅ Icon size limit enforced: 5MB upload max
-    ✅ Icons auto-compressed to ≤200KB before Firestore storage (fixes the 1MB document error)
-    ✅ Delete category tab added with worker-count safety warning
-    ✅ All features working
+    ✅ Icons auto-compressed before storage
+    ✅ Delete category tab with worker-count safety warning
     """)
 
 st.markdown("---")
