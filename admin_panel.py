@@ -757,15 +757,20 @@ elif page == "👥 Users/Employees":
                                         # ── Location — GeoPoint (Flutter expects GeoPoint, not Map) ──
                                         "latitude":  lat,
                                         "longitude": lon,
-                                        "location":  firestore.GeoPoint(lat, lon),  # ← KEY FIX
+                                        "location":  firestore.GeoPoint(lat, lon),
                                         "locationUpdatedAt": firestore.SERVER_TIMESTAMP,
 
                                         # ── Profile flags (Flutter filters on these) ──────
                                         "role":              "worker",
-                                        "isProfileComplete": True,   # ← app skips without this
+                                        "isProfileComplete": True,
                                         "isAvailable":       True,
-                                        "isMobileActive":    False,
-                                        "isWhatsappActive":  False,
+
+                                        # ✅ FIX: Enable Call & WhatsApp buttons immediately
+                                        # Workers uploaded from admin panel don't need to log
+                                        # in first — buttons are visible to app users right away.
+                                        "isMobileActive":    True,
+                                        "isWhatsappActive":  True,
+
                                         "privacyAccepted":         True,
                                         "privacyAcceptedAt":       firestore.SERVER_TIMESTAMP,
                                         "privacyAcceptedVersion":  "1.0.0",
@@ -1029,6 +1034,7 @@ elif page == "🛠️ Job Categories":
 else:
     st.header("⚙️ Settings & Info")
     st.success("Professional Admin Panel • 2026")
+
     st.info("""
     ✅ location saved as GeoPoint (fixes Flutter geo queries)
     ✅ professions saved as array + professionsLower (fixes Flutter .where() filter)
@@ -1038,7 +1044,55 @@ else:
     ✅ Icon size limit enforced: 5MB upload max
     ✅ Icons auto-compressed before storage
     ✅ Delete category tab with worker-count safety warning
+    ✅ isMobileActive = True & isWhatsappActive = True on new imports (Call/WhatsApp visible immediately)
     """)
+
+    st.markdown("---")
+    st.markdown("### 🔧 One-Time Fixes")
+
+    st.markdown("#### 📞 Fix Call & WhatsApp Buttons for Existing Workers")
+    st.caption(
+        "Run this once to enable `isMobileActive` and `isWhatsappActive` on all workers "
+        "that were imported before this fix. Safe to run multiple times."
+    )
+
+    if "fix_mobile_confirm" not in st.session_state:
+        if st.button("📞 Fix All Workers — Enable Mobile & WhatsApp", type="primary", use_container_width=True):
+            st.session_state.fix_mobile_confirm = True
+            st.rerun()
+    else:
+        st.warning("⚠️ This will update every worker document that has `isMobileActive` or `isWhatsappActive` set to False/missing. Continue?")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("🔥 Yes, Fix All Workers", type="primary", use_container_width=True):
+                with st.spinner("Scanning and fixing workers..."):
+                    try:
+                        workers = list(db.collection("workers").stream())
+                        fixed = 0
+                        skipped = 0
+                        for doc in workers:
+                            data = doc.to_dict()
+                            needs_fix = (
+                                not data.get("isMobileActive") or
+                                not data.get("isWhatsappActive")
+                            )
+                            if needs_fix:
+                                doc.reference.update({
+                                    "isMobileActive":  True,
+                                    "isWhatsappActive": True,
+                                })
+                                fixed += 1
+                            else:
+                                skipped += 1
+                        del st.session_state.fix_mobile_confirm
+                        st.success(f"✅ Done! Fixed **{fixed}** workers. {skipped} already had both flags enabled.")
+                        st.balloons()
+                    except Exception as e:
+                        st.error(f"Error during fix: {e}")
+        with c2:
+            if st.button("❌ Cancel", use_container_width=True):
+                del st.session_state.fix_mobile_confirm
+                st.rerun()
 
 st.markdown("---")
 st.markdown("<p style='text-align: center; color: #64748B;'>TCR Job Portal • Professional Admin Panel • 2026</p>", unsafe_allow_html=True)
