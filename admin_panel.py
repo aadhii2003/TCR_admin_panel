@@ -213,6 +213,28 @@ def parse_coordinate(val):
         return dec
     return None
 
+def normalize_mobile(val):
+    """
+    Normalize a mobile number so the same physical number always produces
+    the same string, regardless of how it entered the system.
+
+    Fixes the bug where Excel stores a numeric mobile column as a float
+    (e.g. 9876543210 -> "9876543210.0"). That malformed string used to get
+    saved to Firestore as-is, and since it failed the old `isdigit()` check,
+    it was silently excluded from the duplicate-detection set on the next
+    bulk import — so that one specific worker could be re-imported forever
+    without ever being flagged as a duplicate.
+    """
+    if val is None:
+        return ""
+    s = str(val).strip()
+    if s.lower() in ("nan", "none", ""):
+        return ""
+    if s.endswith(".0"):
+        s = s[:-2]
+    # Strip anything that isn't a digit (spaces, dashes, +91, etc.)
+    return re.sub(r"\D", "", s)
+
 DEFAULT_PHOTO = "https://firebasestorage.googleapis.com/v0/b/placeholder-images.appspot.com/o/default-avatar.png?alt=media"
 
 # ====================== User Management Helpers ======================
@@ -577,6 +599,31 @@ elif page == "👥 Users/Employees":
     with tab3:
         st.markdown("### 📤 Bulk Import Workers from Excel")
 
+        # --------------------------------------------------------------
+        # Persistent summary of the last import run.
+        # IMPORTANT: this is rendered from st.session_state (not from a
+        # transient st.error/st.success inside the import loop) so it
+        # survives the st.rerun() that runs right after import finishes.
+        # Previously, per-row failures were shown with st.error() and then
+        # immediately wiped out by st.rerun(), which is why a worker could
+        # fail silently (e.g. Auth account created but Firestore write
+        # failed) while the admin panel appeared to report success.
+        # --------------------------------------------------------------
+        if st.session_state.get("bulk_import_success") is not None:
+            success_n = st.session_state.get("bulk_import_success", 0)
+            errors = st.session_state.get("bulk_import_errors", [])
+            st.success(f"✅ Last import run: **{success_n}** worker(s) added successfully.")
+            if errors:
+                st.error(f"⚠️ {len(errors)} row(s) failed to import. These were NOT left as orphaned "
+                         f"Auth-only accounts — any partially created Auth user was automatically rolled back.")
+                err_df = pd.DataFrame(errors)
+                st.dataframe(err_df, use_container_width=True, hide_index=True)
+            if st.button("Dismiss Summary", key="dismiss_import_summary"):
+                st.session_state.pop("bulk_import_success", None)
+                st.session_state.pop("bulk_import_errors", None)
+                st.rerun()
+            st.markdown("---")
+
         worker_columns = [
             "name", "email", "mobile", "whatsapp", "address", "city", "state", "gender",
             "profession", "hourlyRate", "experienceYears", "about", "languages", "latitude", "longitude"
@@ -616,15 +663,19 @@ elif page == "👥 Users/Employees":
                 existing_mobiles = set()
                 try:
                     for user in auth.list_users().iterate_all():
-                        existing_emails.add(user.email.lower())
+                        if user.email:
+                            existing_emails.add(str(user.email).strip().lower())
                 except:
                     pass
                 try:
                     for doc in db.collection("workers").stream():
                         data = doc.to_dict()
-                        mobile = str(data.get("mobile", "")).strip()
-                        if mobile.isdigit() and len(mobile) == 10:
-                            existing_mobiles.add(mobile)
+                        # Normalize so previously-corrupted values (e.g. "9876543210.0"
+                        # from an old float-coerced import) still match correctly
+                        # against a clean 10-digit number in a new upload.
+                        mobile_norm = normalize_mobile(data.get("mobile", ""))
+                        if len(mobile_norm) == 10:
+                            existing_mobiles.add(mobile_norm)
                 except:
                     pass
 
@@ -639,7 +690,7 @@ elif page == "👥 Users/Employees":
 
                     name = str(row_dict.get("name", "")).strip()
                     email = str(row_dict.get("email", "")).strip().lower()
-                    mobile = str(row_dict.get("mobile", "")).strip()
+                    mobile = normalize_mobile(row_dict.get("mobile", ""))
                     profession = str(row_dict.get("profession", "")).strip()
 
                     if not name or name.lower() == "nan":
@@ -651,9 +702,9 @@ elif page == "👥 Users/Employees":
                     elif email in existing_emails:
                         errors.append("Email already exists in Authentication.")
 
-                    if not mobile or mobile.lower() == "nan":
+                    if not mobile:
                         errors.append("Mobile is required")
-                    elif not mobile.isdigit() or len(mobile) != 10:
+                    elif len(mobile) != 10:
                         errors.append("Mobile must be exactly 10 digits")
                     elif mobile in existing_mobiles:
                         errors.append("Mobile number already registered")
@@ -670,6 +721,12 @@ elif page == "👥 Users/Employees":
                     if pd.notna(lon_val) and parse_coordinate(lon_val) is None:
                         errors.append("Invalid Longitude")
 
+                    # Store the *normalized* email/mobile back into row_dict so
+                    # every downstream step (dedup set, preview table, and the
+                    # actual Firestore write) uses the same clean value instead
+                    # of the raw, possibly float-corrupted Excel value.
+                    row_dict["email"] = email
+                    row_dict["mobile"] = mobile
                     row_dict["Row"] = row_num
                     row_dict["Status"] = "Invalid" if errors else "Valid"
                     row_dict["Error Details"] = "<br>".join(errors) if errors else "-"
@@ -696,9 +753,12 @@ elif page == "👥 Users/Employees":
                     if st.button("Import All Valid Workers", type="primary", use_container_width=True):
                         with st.spinner("Importing workers..."):
                             success_count = 0
+                            failed_imports = []
                             for row in valid_rows:
+                                created_uid = None
                                 try:
                                     user = auth.create_user(email=row["email"], password="TempPass123!")
+                                    created_uid = user.uid
 
                                     def safe_int(v):
                                         try:
@@ -729,7 +789,7 @@ elif page == "👥 Users/Employees":
                                         "uid":      user.uid,
                                         "name":     row["name"],
                                         "email":    row["email"],
-                                        "mobile":   str(row["mobile"]),
+                                        "mobile":   row["mobile"],  # already normalized to a clean 10-digit string
                                         "whatsapp": clean_nan(row.get("whatsapp")),
                                         "gender":   clean_nan(row.get("gender")),
 
@@ -790,11 +850,30 @@ elif page == "👥 Users/Employees":
                                     success_count += 1
 
                                 except Exception as e:
-                                    st.error(f"Failed for {row['email']}: {str(e)}")
+                                    # If Auth user creation succeeded but the Firestore
+                                    # write failed (bad data, transient network error,
+                                    # etc.), roll back the Auth account instead of
+                                    # leaving a "ghost" user with no profile that the
+                                    # Users/Employees tab would later flag as Orphaned.
+                                    if created_uid:
+                                        try:
+                                            auth.delete_user(created_uid)
+                                        except Exception:
+                                            pass
+                                    failed_imports.append({
+                                        "Row": row.get("Row", "N/A"),
+                                        "Name": row.get("name", "N/A"),
+                                        "Email": row.get("email", "N/A"),
+                                        "Error": str(e)
+                                    })
 
-                            st.success(f"Successfully imported {success_count} workers!")
+                            # Persist results in session_state so they are still
+                            # visible after the st.rerun() below refreshes the page.
+                            st.session_state.bulk_import_success = success_count
+                            st.session_state.bulk_import_errors = failed_imports
                             st.balloons()
                             st.session_state.uploader_key += 1
+                            st.cache_data.clear()
                             st.rerun()
 
                 if invalid_rows:
@@ -1045,6 +1124,9 @@ else:
     ✅ Icons auto-compressed before storage
     ✅ Delete category tab with worker-count safety warning
     ✅ isMobileActive = True & isWhatsappActive = True on new imports (Call/WhatsApp visible immediately)
+    ✅ Mobile numbers normalized (fixes duplicate rows silently bypassing detection)
+    ✅ Failed bulk-import rows now persist visibly across the page rerun instead of flashing and disappearing
+    ✅ Auth account is automatically rolled back if the matching Firestore write fails (no more orphaned Auth-only users)
     """)
 
     st.markdown("---")
@@ -1092,6 +1174,45 @@ else:
         with c2:
             if st.button("❌ Cancel", use_container_width=True):
                 del st.session_state.fix_mobile_confirm
+                st.rerun()
+
+    st.markdown("---")
+    st.markdown("#### 📱 Fix Mobile Numbers Corrupted by Old Excel Float Import")
+    st.caption(
+        "Run this once to clean up worker `mobile` fields that were saved with a trailing "
+        "'.0' (e.g. \"9876543210.0\") due to the old float-coercion bug. Safe to run multiple times."
+    )
+    if "fix_mobile_format_confirm" not in st.session_state:
+        if st.button("📱 Clean Up Malformed Mobile Numbers", type="secondary", use_container_width=True):
+            st.session_state.fix_mobile_format_confirm = True
+            st.rerun()
+    else:
+        st.warning("⚠️ This will rewrite the `mobile` field on any worker document where it isn't a clean 10-digit string.")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("🔥 Yes, Clean Them Up", type="primary", use_container_width=True):
+                with st.spinner("Scanning worker mobile numbers..."):
+                    try:
+                        workers = list(db.collection("workers").stream())
+                        fixed = 0
+                        skipped = 0
+                        for doc in workers:
+                            data = doc.to_dict()
+                            raw = data.get("mobile", "")
+                            clean = normalize_mobile(raw)
+                            if clean != str(raw) and len(clean) == 10:
+                                doc.reference.update({"mobile": clean})
+                                fixed += 1
+                            else:
+                                skipped += 1
+                        del st.session_state.fix_mobile_format_confirm
+                        st.success(f"✅ Done! Cleaned **{fixed}** mobile numbers. {skipped} were already clean.")
+                        st.cache_data.clear()
+                    except Exception as e:
+                        st.error(f"Error during fix: {e}")
+        with c2:
+            if st.button("❌ Cancel", use_container_width=True, key="cancel_mobile_format_fix"):
+                del st.session_state.fix_mobile_format_confirm
                 st.rerun()
 
 st.markdown("---")
